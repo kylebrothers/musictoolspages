@@ -51,7 +51,7 @@ _COL = {
 }
 
 # ── Claude model ──────────────────────────────────────────────────────────────
-CLAUDE_MODEL = "claude-sonnet-4-5-20251001"
+CLAUDE_MODEL = "claude-sonnet-4-5"
 
 # ── Last.fm ───────────────────────────────────────────────────────────────────
 LASTFM_ENDPOINT = "https://ws.audioscrobbler.com/2.0/"
