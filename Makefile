@@ -74,6 +74,14 @@ check-env: mount-nas
 	@printf "Checking .env at $(ENV_FILE_PATH)... "
 	@if [ ! -f "$(ENV_FILE_PATH)" ]; then \
 		echo "$(RED)NOT FOUND$(NC)"; \
+		echo ""; \
+		echo "  Create $(ENV_FILE_PATH) on the NAS using .env.example as a guide."; \
+		echo "  Required NAS directories:"; \
+		echo "    NAS:/Docker/$(APP_NAME)/config"; \
+		echo "    NAS:/Docker/$(APP_NAME)/logs"; \
+		echo "    NAS:/Docker/$(APP_NAME)/server_files"; \
+		echo "    NAS:/Docker/$(APP_NAME)/database"; \
+		echo ""; \
 		exit 1; \
 	else \
 		echo "$(GREEN)ok$(NC)"; \
@@ -83,12 +91,14 @@ check-env: mount-nas
 		echo "$(GREEN)set$(NC)"; \
 	else \
 		echo "$(RED)missing or malformed$(NC)"; \
+		exit 1; \
 	fi
 	@printf "Checking SECRET_KEY... "
 	@if grep -qE "^SECRET_KEY=.{10,}" "$(ENV_FILE_PATH)"; then \
 		echo "$(GREEN)set$(NC)"; \
 	else \
 		echo "$(RED)missing or too short$(NC)"; \
+		exit 1; \
 	fi
 
 setup: check-env
@@ -105,15 +115,15 @@ setup: check-env
 
 build: check-env
 	@echo "$(YELLOW)Building $(APP_NAME)...$(NC)"
-	ENV_FILE_PATH=$(ENV_FILE_PATH) NAS_IP=$(NAS_IP) \
-		docker-compose build
+	@cp $(ENV_FILE_PATH) .env
+	NAS_IP=$(NAS_IP) docker-compose build
 	@echo "$(GREEN)Build complete.$(NC)"
 
 up: setup
 	@echo "$(YELLOW)Starting $(APP_NAME)...$(NC)"
 	@cp $(ENV_FILE_PATH) .env
 	NAS_IP=$(NAS_IP) docker-compose up -d --build
-	@echo "$(GREEN)$(APP_NAME) started.$(NC)"
+	@echo "$(GREEN)$(APP_NAME) started. http://localhost:$$(grep HOST_PORT .env | cut -d= -f2 || echo 5000)$(NC)"
 
 down:
 	@echo "$(YELLOW)Stopping $(APP_NAME)...$(NC)"
@@ -122,23 +132,23 @@ down:
 
 restart: check-env
 	@echo "$(YELLOW)Restarting $(APP_NAME)...$(NC)"
+	@cp $(ENV_FILE_PATH) .env
 	docker-compose down
-	ENV_FILE_PATH=$(ENV_FILE_PATH) NAS_IP=$(NAS_IP) \
-		docker-compose up -d
+	NAS_IP=$(NAS_IP) docker-compose up -d
 	@echo "$(GREEN)Restarted.$(NC)"
 
 pull: check-env
 	@echo "$(YELLOW)Pulling latest changes...$(NC)"
 	git pull
 	@echo "$(YELLOW)Rebuilding and restarting...$(NC)"
-	ENV_FILE_PATH=$(ENV_FILE_PATH) NAS_IP=$(NAS_IP) \
-		docker-compose up -d --build
+	@cp $(ENV_FILE_PATH) .env
+	NAS_IP=$(NAS_IP) docker-compose up -d --build
 	@echo "$(GREEN)Deployment complete.$(NC)"
 
 dev: check-env
 	@echo "$(YELLOW)Starting $(APP_NAME) in development mode (FLASK_DEBUG=true)...$(NC)"
-	ENV_FILE_PATH=$(ENV_FILE_PATH) NAS_IP=$(NAS_IP) FLASK_DEBUG=true \
-		docker-compose up -d --build
+	@cp $(ENV_FILE_PATH) .env
+	NAS_IP=$(NAS_IP) FLASK_DEBUG=true docker-compose up -d --build
 	@echo "$(GREEN)Dev server started. Logs: make logs$(NC)"
 
 logs:
@@ -152,7 +162,7 @@ status:
 	docker-compose ps
 	@echo ""
 	@echo "$(YELLOW)Health check:$(NC)"
-	@curl -sf http://localhost:$$(grep HOST_PORT $(ENV_FILE_PATH) 2>/dev/null | cut -d= -f2 || echo 5000)/health \
+	@curl -sf http://localhost:$$(grep HOST_PORT .env 2>/dev/null | cut -d= -f2 || echo 5000)/health \
 		| python3 -m json.tool 2>/dev/null || echo "Container not responding"
 
 clean:
