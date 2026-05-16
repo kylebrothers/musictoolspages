@@ -1,8 +1,9 @@
-version: '3.8'
-
 services:
   playlistrec:
-    build: .
+    build:
+      context: .
+      args:
+        TEMPLATE_SHA: ${TEMPLATE_SHA:-unknown}
     container_name: playlistrec
     ports:
       - "${HOST_PORT:-5000}:5000"
