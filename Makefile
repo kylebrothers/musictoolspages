@@ -14,7 +14,7 @@ NAS_MOUNT_PATH := /mnt/nas
 APP_NAME       := playlistrec
 
 # ── Derived ───────────────────────────────────────────────────────────────────
-ENV_FILE_PATH  := $(NAS_MOUNT_PATH)/config/$(APP_NAME)/.env
+ENV_FILE_PATH  := $(NAS_MOUNT_PATH)/Docker/$(APP_NAME)/config/.env
 CONTAINER_NAME := $(APP_NAME)
 
 # ── Colours ───────────────────────────────────────────────────────────────────
