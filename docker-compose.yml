@@ -14,8 +14,6 @@ services:
       - APP_NAME=${APP_NAME:-playlistrec}
       - LASTFM_API_KEY=${LASTFM_API_KEY}
       - DB_PATH=/app/database/playlistrec.db
-    env_file:
-      - ${ENV_FILE_PATH:-/mnt/nas/config/playlistrec/.env}
     volumes:
       - playlistrec_logs:/app/logs
       - playlistrec_server_files:/app/server_files
