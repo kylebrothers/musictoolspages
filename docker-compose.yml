@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  playlistrec:
+    build: .
+    container_name: playlistrec
+    ports:
+      - "${HOST_PORT:-5000}:5000"
+    environment:
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - FLASK_DEBUG=${FLASK_DEBUG:-false}
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - APP_NAME=${APP_NAME:-playlistrec}
+      - LASTFM_API_KEY=${LASTFM_API_KEY}
+      - DB_PATH=/app/database/playlistrec.db
+    env_file:
+      - ${ENV_FILE_PATH:-/mnt/nas/config/playlistrec/.env}
+    volumes:
+      - playlistrec_logs:/app/logs
+      - playlistrec_server_files:/app/server_files
+      - playlistrec_database:/app/database
+      # ── Optional: NAS override for live template editing during development ──
+      # Remove before committing.
+      # - /mnt/nas/dev/playlistrec/templates:/app/templates
+    restart: unless-stopped
+    networks:
+      - playlistrec-network
+
+volumes:
+  playlistrec_logs:
+    driver: local
+    driver_opts:
+      type: nfs
+      device: ":/Docker/playlistrec/logs"
+      o: "nfsvers=4,addr=${NAS_IP:-192.168.0.134},nolock,soft,rw"
+
+  playlistrec_server_files:
+    driver: local
+    driver_opts:
+      type: nfs
+      device: ":/Docker/playlistrec/server_files"
+      o: "nfsvers=4,addr=${NAS_IP:-192.168.0.134},nolock,soft,rw"
+
+  playlistrec_database:
+    driver: local
+    driver_opts:
+      type: nfs
+      device: ":/Docker/playlistrec/database"
+      o: "nfsvers=4,addr=${NAS_IP:-192.168.0.134},nolock,soft,rw"
+
+networks:
+  playlistrec-network:
+    driver: bridge
