@@ -7,6 +7,9 @@
 #   4. Copy template files into /app
 #   5. Copy app-specific files into /app (overrides template where names match)
 #
+# TEMPLATE_SHA is passed by the Makefile and changes whenever the template
+# repo gets a new commit, forcing Docker to invalidate the clone cache layer.
+#
 # To pin to a specific template version:
 #   docker-compose build --build-arg TEMPLATE_REF=v1.0
 # ─────────────────────────────────────────────────────────────────────────────
@@ -24,11 +27,13 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Pull template from GitHub ─────────────────────────────────────────────────
+# TEMPLATE_SHA changes with every template commit, busting the Docker cache
+# automatically so the clone always reflects the latest template.
 ARG TEMPLATE_REF=main
-RUN git clone --depth 1 --branch ${TEMPLATE_REF} \
-    https://github.com/kylebrothers/flask-app-template /tmp/template \
-    && echo "Template ref: ${TEMPLATE_REF}" \
-    && ls /tmp/template
+ARG TEMPLATE_SHA=unknown
+RUN echo "Template ref: ${TEMPLATE_REF} @ ${TEMPLATE_SHA}" && \
+    git clone --depth 1 --branch ${TEMPLATE_REF} \
+    https://github.com/kylebrothers/flask-app-template /tmp/template
 
 # ── Install template base requirements ───────────────────────────────────────
 RUN pip install --no-cache-dir -r /tmp/template/requirements.txt
