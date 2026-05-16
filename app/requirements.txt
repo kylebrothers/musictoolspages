@@ -1,0 +1,5 @@
+# playlistrec app-specific requirements
+# Installed on top of template base (Flask, anthropic, gunicorn, python-dotenv, Flask-Limiter)
+
+requests  # Last.fm API calls
+pandas    # optional: may be used for CSV analysis if needed in future pages
