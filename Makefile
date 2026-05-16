@@ -111,9 +111,9 @@ build: check-env
 
 up: setup
 	@echo "$(YELLOW)Starting $(APP_NAME)...$(NC)"
-	ENV_FILE_PATH=$(ENV_FILE_PATH) NAS_IP=$(NAS_IP) \
-		docker-compose up -d --build
-	@echo "$(GREEN)$(APP_NAME) started. http://localhost:$$(grep HOST_PORT $(ENV_FILE_PATH) | cut -d= -f2 || echo 5000)$(NC)"
+	@cp $(ENV_FILE_PATH) .env
+	NAS_IP=$(NAS_IP) docker-compose up -d --build
+	@echo "$(GREEN)$(APP_NAME) started.$(NC)"
 
 down:
 	@echo "$(YELLOW)Stopping $(APP_NAME)...$(NC)"
