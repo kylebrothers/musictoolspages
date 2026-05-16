@@ -74,16 +74,21 @@ check-env: mount-nas
 	@printf "Checking .env at $(ENV_FILE_PATH)... "
 	@if [ ! -f "$(ENV_FILE_PATH)" ]; then \
 		echo "$(RED)NOT FOUND$(NC)"; \
-		echo ""; \
-		echo "  Create $(ENV_FILE_PATH) on the NAS using .env.example as a guide."; \
-		echo "  Required NAS directories:"; \
-		echo "    NAS:/Docker/$(APP_NAME)/logs"; \
-		echo "    NAS:/Docker/$(APP_NAME)/server_files"; \
-		echo "    NAS:/Docker/$(APP_NAME)/database"; \
-		echo ""; \
 		exit 1; \
 	else \
 		echo "$(GREEN)ok$(NC)"; \
+	fi
+	@printf "Checking CLAUDE_API_KEY... "
+	@if grep -q "^CLAUDE_API_KEY=sk-" "$(ENV_FILE_PATH)"; then \
+		echo "$(GREEN)set$(NC)"; \
+	else \
+		echo "$(RED)missing or malformed$(NC)"; \
+	fi
+	@printf "Checking SECRET_KEY... "
+	@if grep -qE "^SECRET_KEY=.{10,}" "$(ENV_FILE_PATH)"; then \
+		echo "$(GREEN)set$(NC)"; \
+	else \
+		echo "$(RED)missing or too short$(NC)"; \
 	fi
 
 setup: check-env
