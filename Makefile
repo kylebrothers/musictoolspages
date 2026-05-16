@@ -17,6 +17,12 @@ APP_NAME       := playlistrec
 ENV_FILE_PATH  := $(NAS_MOUNT_PATH)/Docker/$(APP_NAME)/config/.env
 CONTAINER_NAME := $(APP_NAME)
 
+# ── Template cache-busting ────────────────────────────────────────────────────
+# Fetches the current HEAD SHA of the template repo. Passing this as a build
+# arg causes Docker to invalidate the clone cache layer whenever the template
+# gets a new commit, so make up always picks up template changes automatically.
+TEMPLATE_SHA   := $(shell git ls-remote https://github.com/kylebrothers/flask-app-template HEAD 2>/dev/null | cut -f1)
+
 # ── Colours ───────────────────────────────────────────────────────────────────
 GREEN  := \033[0;32m
 YELLOW := \033[1;33m
@@ -115,14 +121,16 @@ setup: check-env
 
 build: check-env
 	@echo "$(YELLOW)Building $(APP_NAME)...$(NC)"
+	@echo "$(YELLOW)Template SHA: $(TEMPLATE_SHA)$(NC)"
 	@cp $(ENV_FILE_PATH) .env
-	NAS_IP=$(NAS_IP) docker-compose build
+	NAS_IP=$(NAS_IP) TEMPLATE_SHA=$(TEMPLATE_SHA) docker-compose build
 	@echo "$(GREEN)Build complete.$(NC)"
 
 up: setup
 	@echo "$(YELLOW)Starting $(APP_NAME)...$(NC)"
+	@echo "$(YELLOW)Template SHA: $(TEMPLATE_SHA)$(NC)"
 	@cp $(ENV_FILE_PATH) .env
-	NAS_IP=$(NAS_IP) docker-compose up -d --build
+	NAS_IP=$(NAS_IP) TEMPLATE_SHA=$(TEMPLATE_SHA) docker-compose up -d --build
 	@echo "$(GREEN)$(APP_NAME) started. http://localhost:$$(grep HOST_PORT .env | cut -d= -f2 || echo 5000)$(NC)"
 
 down:
@@ -134,7 +142,7 @@ restart: check-env
 	@echo "$(YELLOW)Restarting $(APP_NAME)...$(NC)"
 	@cp $(ENV_FILE_PATH) .env
 	docker-compose down
-	NAS_IP=$(NAS_IP) docker-compose up -d
+	NAS_IP=$(NAS_IP) TEMPLATE_SHA=$(TEMPLATE_SHA) docker-compose up -d
 	@echo "$(GREEN)Restarted.$(NC)"
 
 pull: check-env
@@ -142,13 +150,13 @@ pull: check-env
 	git pull
 	@echo "$(YELLOW)Rebuilding and restarting...$(NC)"
 	@cp $(ENV_FILE_PATH) .env
-	NAS_IP=$(NAS_IP) docker-compose up -d --build
+	NAS_IP=$(NAS_IP) TEMPLATE_SHA=$(TEMPLATE_SHA) docker-compose up -d --build
 	@echo "$(GREEN)Deployment complete.$(NC)"
 
 dev: check-env
 	@echo "$(YELLOW)Starting $(APP_NAME) in development mode (FLASK_DEBUG=true)...$(NC)"
 	@cp $(ENV_FILE_PATH) .env
-	NAS_IP=$(NAS_IP) FLASK_DEBUG=true docker-compose up -d --build
+	NAS_IP=$(NAS_IP) TEMPLATE_SHA=$(TEMPLATE_SHA) FLASK_DEBUG=true docker-compose up -d --build
 	@echo "$(GREEN)Dev server started. Logs: make logs$(NC)"
 
 logs:
