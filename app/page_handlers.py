@@ -1,90 +1,445 @@
 """
-app/page_handlers.py — App-specific page handler overrides.
+page_handlers.py — App-specific handlers for playlistrec.
 
-This file overrides the template's page_handlers.py. You have three options:
+This file adds custom API routes via register_routes() and does NOT override
+the template's handle_claude_call_page / handle_no_call_page — those are
+used as-is from the template for any generic page submissions.
 
-─────────────────────────────────────────────────────────────────────────────
-OPTION A — Full override (replace both standard handlers):
-    Implement handle_claude_call_page and handle_no_call_page from scratch.
-    Use this when your app needs fundamentally different logic for the
-    generic /api/<page_name> route.
-─────────────────────────────────────────────────────────────────────────────
-OPTION B — Partial override (extend one or both standard handlers):
-    Import the base handlers and wrap them with pre/post logic.
-
-    Example:
-        from page_handlers import (
-            handle_claude_call_page as _base_claude,
-            handle_no_call_page as _base_no_call,
-        )
-
-        def handle_claude_call_page(page_name, form_data, uploaded_files_data,
-                                     server_files_data, session_id, claude_client):
-            form_data['injected_context'] = 'some extra context'
-            return _base_claude(page_name, form_data, uploaded_files_data,
-                                server_files_data, session_id, claude_client)
-─────────────────────────────────────────────────────────────────────────────
-OPTION C — Custom page type:
-    Define handle_custom_page() to handle forms that set page_type="custom".
-    Use this when a page needs server-side logic that doesn't fit the
-    claude-call / no-call pattern but still submits via the generic
-    /api/<page_name> route.
-
-    Signature:
-        def handle_custom_page(page_name, form_data, uploaded_files_data,
-                               server_files_data, session_id, claude_client):
-            ...
-            return jsonify({...})
-─────────────────────────────────────────────────────────────────────────────
-OPTION D — Custom API endpoints (recommended for complex apps):
-    Define register_routes(app, claude_client_ref) to add your own routes
-    directly on the Flask app. Called automatically by app.py at startup.
-    Use this when your app needs endpoints that don't fit the generic
-    /api/<page_name> pattern — e.g. REST-style resource routes, file upload
-    endpoints, or a multi-step pipeline.
-
-    Example:
-        def register_routes(app, claude_client_ref):
-            @app.route('/api/myresource', methods=['GET'])
-            def list_resources():
-                return jsonify({'items': [...]})
-
-            @app.route('/api/myapp/run', methods=['POST'])
-            def run_pipeline():
-                client = claude_client_ref()
-                ...
-─────────────────────────────────────────────────────────────────────────────
-
-Delete this file entirely if you don't need any custom handler logic —
-the template's page_handlers.py will be used as-is.
+Custom endpoints registered by register_routes():
+  GET    /api/profiles              — list profiles
+  POST   /api/profiles              — create profile
+  GET    /api/profiles/<id>         — get profile
+  PUT    /api/profiles/<id>         — update profile (name, seed_artists, disliked_artists)
+  DELETE /api/profiles/<id>         — delete profile
+  POST   /api/profiles/<id>/csv     — upload CSV, compute centroid
+  GET    /api/profiles/<id>/feedback — get all feedback + notes
+  POST   /api/profiles/<id>/feedback — upsert rating + optional maybe note
+  DELETE /api/profiles/<id>/feedback — clear all feedback
+  POST   /api/playlist-rec/run      — full two-pass recommendation pipeline
 """
 
-# PLACEHOLDER: Implement the option(s) you need, then remove unused stubs.
+import io
+import os
+import csv
+import json
+import logging
+import requests
+from flask import request, jsonify, current_app
 
-# ── Option B example (uncomment to use) ──────────────────────────────────────
-# from page_handlers import handle_claude_call_page as _base_claude  # noqa
-# from page_handlers import handle_no_call_page as _base_no_call      # noqa
-#
-# def handle_claude_call_page(page_name, form_data, uploaded_files_data,
-#                              server_files_data, session_id, claude_client):
-#     form_data['injected_context'] = 'extra context here'
-#     return _base_claude(page_name, form_data, uploaded_files_data,
-#                         server_files_data, session_id, claude_client)
+import db
+
+logger = logging.getLogger(__name__)
+
+# ── Audio feature columns used for centroid computation ───────────────────────
+CENTROID_FIELDS = [
+    "Energy", "Danceability", "Valence", "Acousticness",
+    "Instrumentalness", "Loudness", "Tempo", "Speechiness",
+]
+
+# Column index map (0-based) matching the Spotify CSV export format
+_COL = {
+    "Track Name": 1,
+    "Artist Name(s)": 3,
+    "Danceability": 12,
+    "Energy": 13,
+    "Loudness": 15,
+    "Speechiness": 17,
+    "Acousticness": 18,
+    "Instrumentalness": 19,
+    "Valence": 21,
+    "Tempo": 22,
+}
+
+# ── Claude model ──────────────────────────────────────────────────────────────
+CLAUDE_MODEL = "claude-sonnet-4-5-20251001"
+
+# ── Last.fm ───────────────────────────────────────────────────────────────────
+LASTFM_ENDPOINT = "https://ws.audioscrobbler.com/2.0/"
+LASTFM_SEED_ARTISTS = ["Weezer", "Barenaked Ladies", "Fountains of Wayne"]
+LASTFM_SIMILAR_COUNT = 15
 
 
-# ── Option C example (uncomment to use) ──────────────────────────────────────
-# from flask import jsonify
-#
-# def handle_custom_page(page_name, form_data, uploaded_files_data,
-#                        server_files_data, session_id, claude_client):
-#     # Your logic here
-#     return jsonify({'result': '...'})
+# handle_claude_call_page and handle_no_call_page are intentionally NOT defined
+# here. app.py imports them from the template's page_handlers.py, which provides
+# the full generic implementations. This app uses register_routes() exclusively
+# for its own endpoints and does not need to override the generic handlers.
 
 
-# ── Option D example (uncomment to use) ──────────────────────────────────────
-# from flask import request, jsonify
-#
-# def register_routes(app, claude_client_ref):
-#     @app.route('/api/myresource', methods=['GET'])
-#     def list_resources():
-#         return jsonify({'items': []})
+# ── CSV processing ────────────────────────────────────────────────────────────
+
+def parse_spotify_csv(file_bytes):
+    """
+    Parse a Spotify export CSV (bytes).
+    Returns (centroid dict, top_artists list, track_count int).
+    """
+    text = file_bytes.decode("utf-8-sig", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+
+    if not rows:
+        raise ValueError("Empty CSV file.")
+
+    # Detect header row and build column map
+    header = [h.strip() for h in rows[0]]
+    col = {name: header.index(name) for name in _COL if name in header}
+
+    missing = [f for f in list(_COL.keys()) if f not in col]
+    if missing:
+        raise ValueError(f"CSV missing columns: {', '.join(missing)}")
+
+    artist_counts = {}
+    feature_sums = {f: 0.0 for f in CENTROID_FIELDS}
+    valid = 0
+
+    for row in rows[1:]:
+        if len(row) < max(col.values()) + 1:
+            continue
+        try:
+            for field in CENTROID_FIELDS:
+                feature_sums[field] += float(row[col[field]])
+            valid += 1
+        except (ValueError, IndexError):
+            continue
+
+        # Count artists (may be semicolon-separated)
+        for artist in row[col["Artist Name(s)"]].split(";"):
+            artist = artist.strip()
+            if artist:
+                artist_counts[artist] = artist_counts.get(artist, 0) + 1
+
+    if valid == 0:
+        raise ValueError("No valid audio feature rows found.")
+
+    centroid = {f: round(feature_sums[f] / valid, 4) for f in CENTROID_FIELDS}
+    top_artists = sorted(artist_counts, key=lambda a: -artist_counts[a])[:15]
+
+    return centroid, top_artists, valid
+
+
+# ── Last.fm ───────────────────────────────────────────────────────────────────
+
+def fetch_lastfm_similar(api_key, seed_artists=None, count=LASTFM_SIMILAR_COUNT):
+    """
+    Fetch similar artists from Last.fm for each seed artist.
+    Returns deduplicated list of artist names.
+    """
+    if not api_key:
+        return []
+    seeds = seed_artists or LASTFM_SEED_ARTISTS
+    seen = set(s.lower() for s in seeds)
+    results = []
+
+    for artist in seeds:
+        try:
+            resp = requests.get(
+                LASTFM_ENDPOINT,
+                params={
+                    "method": "artist.getsimilar",
+                    "artist": artist,
+                    "api_key": api_key,
+                    "format": "json",
+                    "limit": count,
+                },
+                timeout=5,
+            )
+            data = resp.json()
+            for a in data.get("similarartists", {}).get("artist", []):
+                name = a.get("name", "").strip()
+                if name and name.lower() not in seen:
+                    seen.add(name.lower())
+                    results.append(name)
+        except Exception as e:
+            logger.warning(f"Last.fm error for {artist}: {e}")
+
+    return results
+
+
+# ── Prompt builders ───────────────────────────────────────────────────────────
+
+def _build_pass1_prompt(profile, similar_artists, feedback):
+    centroid = profile.get("centroid") or {}
+    seed_artists = profile.get("seed_artists") or []
+    disliked = profile.get("disliked_artists") or []
+
+    yes_tracks = [k for k, v in feedback.items() if v == "yes"]
+    maybe_tracks = [k for k, v in feedback.items() if v == "maybe"]
+    no_tracks = [k for k, v in feedback.items() if v == "no"]
+
+    lines = [
+        "You are generating a raw candidate list of song recommendations for human validation.",
+        "This is Pass 1 — do NOT self-correct, retract, or second-guess any suggestion.",
+        "Output ONLY the structured format below. No preamble. No explanation. No self-correction.",
+        "",
+        "## Listener Profile",
+        f"Seed artists: {', '.join(seed_artists) if seed_artists else 'None'}",
+        f"Disliked artists (exclude these entirely): {', '.join(disliked) if disliked else 'None'}",
+        "",
+        "## Audio Centroid (Spotify feature averages)",
+    ]
+    for k, v in centroid.items():
+        lines.append(f"  {k}: {v}")
+
+    if similar_artists:
+        lines += [
+            "",
+            "## Last.fm Similar Artists (bias candidates toward these)",
+            ", ".join(similar_artists[:20]),
+        ]
+
+    if yes_tracks:
+        lines += ["", "## Confirmed Good Fits (find more songs like these)"] + yes_tracks
+    if maybe_tracks:
+        lines += ["", "## Borderline (calibration signal — note nuances)"] + maybe_tracks
+    if no_tracks:
+        lines += ["", "## Hard Exclusions (do not recommend these artists or songs)"] + no_tracks
+
+    lines += [
+        "",
+        "## Output Format (20 candidates, one per line)",
+        '"Song Title" – Artist (Year) | energy:[0-1] danceability:[0-1] valence:[0-1] acousticness:[0-1] tempo:[BPM] | solo:[yes/no/notable] | [one sentence on fit]',
+        "",
+        "Generate 20 candidates now:",
+    ]
+
+    return "\n".join(lines)
+
+
+def _build_pass2_prompt(profile, candidates_text, feedback):
+    disliked = profile.get("disliked_artists") or []
+    no_tracks = [k for k, v in feedback.items() if v == "no"]
+
+    lines = [
+        "You are validating and filtering a candidate song list. Apply the rules strictly.",
+        "Output ONLY the structured format below. No preamble. No explanation. No self-correction.",
+        "The final output MUST begin with the word RECOMMENDATIONS on its own line.",
+        "",
+        "## Hard Rejection Rules",
+        "Reject a candidate if ANY of the following are true:",
+        "  - Energy > 0.94",
+        "  - Acousticness > 0.28",
+        "  - Tempo outside 92–172 BPM",
+        "  - Valence < 0.18",
+        f"  - Artist is in disliked list: {', '.join(disliked) if disliked else 'None'}",
+        "  - Already in the user's collection (common knowledge check)",
+        "  - solo:no with no other strong qualifying factors",
+    ]
+
+    if no_tracks:
+        lines += [
+            "  - Song or artist appears in session exclusion list:",
+        ] + [f"      {t}" for t in no_tracks]
+
+    lines += [
+        "",
+        "## Candidate List",
+        candidates_text,
+        "",
+        "## Output",
+        "RECOMMENDATIONS",
+        "List 8–10 approved songs, one per line, in the same format as the input.",
+        "",
+        "ARTIST RABBIT HOLES",
+        "List 3–5 artist names worth exploring, one per line.",
+    ]
+
+    return "\n".join(lines)
+
+
+# ── Pipeline runner ───────────────────────────────────────────────────────────
+
+def run_pipeline(profile, claude_client, lastfm_api_key, feedback):
+    """
+    Execute the two-pass recommendation pipeline.
+    Returns (result_dict, http_status_code).
+    """
+    if not claude_client:
+        return {"error": "Claude API not available"}, 503
+
+    similar = fetch_lastfm_similar(lastfm_api_key, profile.get("seed_artists"))
+
+    # Pass 1
+    p1_prompt = _build_pass1_prompt(profile, similar, feedback)
+    try:
+        p1_resp = claude_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": p1_prompt}],
+        )
+        candidates_text = p1_resp.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"Pass 1 error: {e}")
+        return {"error": f"Pass 1 Claude error: {str(e)}"}, 500
+
+    # Pass 2
+    p2_prompt = _build_pass2_prompt(profile, candidates_text, feedback)
+    try:
+        p2_resp = claude_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": p2_prompt}],
+        )
+        p2_text = p2_resp.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"Pass 2 error: {e}")
+        return {"error": f"Pass 2 Claude error: {str(e)}"}, 500
+
+    if "RECOMMENDATIONS" in p2_text:
+        p2_text = p2_text[p2_text.index("RECOMMENDATIONS"):]
+
+    recommendations = []
+    rabbit_holes = []
+    section = None
+
+    for line in p2_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.upper().startswith("RECOMMENDATIONS"):
+            section = "rec"
+            continue
+        if stripped.upper().startswith("ARTIST RABBIT HOLES"):
+            section = "rabbit"
+            continue
+        if section == "rec" and stripped.startswith('"'):
+            recommendations.append(stripped)
+        elif section == "rabbit" and stripped:
+            rabbit_holes.append(stripped)
+
+    return {
+        "recommendations": recommendations,
+        "rabbit_holes": rabbit_holes,
+        "pass1_raw": candidates_text,
+        "lastfm_similar_count": len(similar),
+    }, 200
+
+
+# ── Custom route registration ─────────────────────────────────────────────────
+
+def register_routes(app, claude_client_ref):
+    """
+    Register playlistrec-specific API routes on the Flask app.
+    Called automatically by app.py at startup.
+    """
+    import db as _db
+    _db.init_db()  # idempotent — creates tables if not present
+
+    lastfm_key = os.environ.get("LASTFM_API_KEY", "")
+
+    # ── Profile CRUD ──────────────────────────────────────────────────────────
+
+    @app.route("/api/profiles", methods=["GET"])
+    def list_profiles():
+        return jsonify({"profiles": _db.get_all_profiles()})
+
+    @app.route("/api/profiles", methods=["POST"])
+    def create_profile():
+        data = request.get_json(force=True, silent=True) or {}
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        if _db.get_profile_by_name(name):
+            return jsonify({"error": f"Profile '{name}' already exists"}), 409
+        profile = _db.create_profile(
+            name=name,
+            seed_artists=data.get("seed_artists", []),
+            disliked_artists=data.get("disliked_artists", []),
+        )
+        return jsonify({"profile": profile}), 201
+
+    @app.route("/api/profiles/<int:pid>", methods=["GET"])
+    def get_profile(pid):
+        p = _db.get_profile(pid)
+        if not p:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify({"profile": p})
+
+    @app.route("/api/profiles/<int:pid>", methods=["PUT"])
+    def update_profile(pid):
+        if not _db.get_profile(pid):
+            return jsonify({"error": "Not found"}), 404
+        data = request.get_json(force=True, silent=True) or {}
+        kwargs = {}
+        for field in ("name", "seed_artists", "disliked_artists"):
+            if field in data:
+                kwargs[field] = data[field]
+        _db.update_profile(pid, **kwargs)
+        return jsonify({"profile": _db.get_profile(pid)})
+
+    @app.route("/api/profiles/<int:pid>", methods=["DELETE"])
+    def delete_profile(pid):
+        if not _db.get_profile(pid):
+            return jsonify({"error": "Not found"}), 404
+        _db.delete_profile(pid)
+        return jsonify({"deleted": pid})
+
+    # ── CSV upload → centroid ─────────────────────────────────────────────────
+
+    @app.route("/api/profiles/<int:pid>/csv", methods=["POST"])
+    def upload_csv(pid):
+        profile = _db.get_profile(pid)
+        if not profile:
+            return jsonify({"error": "Profile not found"}), 404
+        if "csv_file" not in request.files:
+            return jsonify({"error": "No csv_file in request"}), 400
+        f = request.files["csv_file"]
+        try:
+            centroid, top_artists, track_count = parse_spotify_csv(f.read())
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        _db.update_profile(pid, centroid=centroid)
+        return jsonify({
+            "centroid": centroid,
+            "top_artists": top_artists,
+            "track_count": track_count,
+            "message": f"Centroid computed from {track_count} tracks.",
+        })
+
+    # ── Feedback ──────────────────────────────────────────────────────────────
+
+    @app.route("/api/profiles/<int:pid>/feedback", methods=["GET"])
+    def get_feedback(pid):
+        if not _db.get_profile(pid):
+            return jsonify({"error": "Not found"}), 404
+        ratings = _db.get_feedback(pid)
+        notes = _db.get_maybe_notes(pid)
+        return jsonify({"feedback": ratings, "notes": notes})
+
+    @app.route("/api/profiles/<int:pid>/feedback", methods=["POST"])
+    def set_feedback(pid):
+        if not _db.get_profile(pid):
+            return jsonify({"error": "Not found"}), 404
+        data = request.get_json(force=True, silent=True) or {}
+        track_key = (data.get("track_key") or "").strip()
+        rating = data.get("rating", "")
+        if not track_key or rating not in ("yes", "maybe", "no"):
+            return jsonify({"error": "track_key and rating (yes/maybe/no) required"}), 400
+        _db.set_feedback(pid, track_key, rating)
+        if rating == "maybe" and "note" in data:
+            _db.set_maybe_note(pid, track_key, data["note"])
+        return jsonify({"ok": True})
+
+    @app.route("/api/profiles/<int:pid>/feedback", methods=["DELETE"])
+    def clear_feedback(pid):
+        if not _db.get_profile(pid):
+            return jsonify({"error": "Not found"}), 404
+        _db.clear_feedback(pid)
+        return jsonify({"ok": True})
+
+    # ── Recommendation pipeline ───────────────────────────────────────────────
+
+    @app.route("/api/playlist-rec/run", methods=["POST"])
+    def run_recommendations():
+        data = request.get_json(force=True, silent=True) or {}
+        pid = data.get("profile_id")
+        if not pid:
+            return jsonify({"error": "profile_id required"}), 400
+        profile = _db.get_profile(int(pid))
+        if not profile:
+            return jsonify({"error": "Profile not found"}), 404
+        if not profile.get("centroid"):
+            return jsonify({"error": "Profile has no centroid — upload a CSV first"}), 400
+        feedback = _db.get_feedback(int(pid))
+        result, status = run_pipeline(
+            profile, claude_client_ref(), lastfm_key, feedback
+        )
+        return jsonify(result), status
