@@ -27,6 +27,7 @@ import requests
 from flask import request, jsonify, current_app
 
 import db
+from config import get_claude_model
 
 logger = logging.getLogger(__name__)
 
@@ -49,61 +50,6 @@ _COL = {
     "Valence": 21,
     "Tempo": 22,
 }
-
-# ── Claude model ──────────────────────────────────────────────────────────────
-# If CLAUDE_MODEL is set in the environment, use it directly.
-# Otherwise, query the Anthropic models API at startup and pick the latest
-# Sonnet. Falls back to a hardcoded value if the API call fails.
-
-_CLAUDE_MODEL_FALLBACK = "claude-sonnet-4-5"
-_resolved_model = None
-
-
-def get_claude_model(api_key=None):
-    """
-    Return the Claude model to use for all pipeline calls.
-    Resolution order:
-      1. CLAUDE_MODEL env var (allows pinning via .env)
-      2. Latest Sonnet from Anthropic models API
-      3. Hardcoded fallback
-    Result is cached after first call.
-    """
-    global _resolved_model
-    if _resolved_model:
-        return _resolved_model
-
-    env_model = os.environ.get("CLAUDE_MODEL", "").strip()
-    if env_model:
-        logger.info(f"Claude model: {env_model} (from CLAUDE_MODEL env var)")
-        _resolved_model = env_model
-        return _resolved_model
-
-    key = api_key or os.environ.get("CLAUDE_API_KEY", "")
-    if key:
-        try:
-            resp = requests.get(
-                "https://api.anthropic.com/v1/models",
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                },
-                timeout=5,
-            )
-            models = resp.json().get("data", [])
-            sonnets = sorted(
-                [m["id"] for m in models if "sonnet" in m["id"].lower()],
-                reverse=True,
-            )
-            if sonnets:
-                _resolved_model = sonnets[0]
-                logger.info(f"Claude model: {_resolved_model} (latest Sonnet from API)")
-                return _resolved_model
-        except Exception as e:
-            logger.warning(f"Could not resolve latest Sonnet from API: {e}")
-
-    logger.warning(f"Claude model: {_CLAUDE_MODEL_FALLBACK} (fallback)")
-    _resolved_model = _CLAUDE_MODEL_FALLBACK
-    return _resolved_model
 
 # ── Last.fm ───────────────────────────────────────────────────────────────────
 LASTFM_ENDPOINT = "https://ws.audioscrobbler.com/2.0/"
