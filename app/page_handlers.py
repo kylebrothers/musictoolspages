@@ -51,7 +51,59 @@ _COL = {
 }
 
 # ── Claude model ──────────────────────────────────────────────────────────────
-CLAUDE_MODEL = "claude-sonnet-4-5"
+# If CLAUDE_MODEL is set in the environment, use it directly.
+# Otherwise, query the Anthropic models API at startup and pick the latest
+# Sonnet. Falls back to a hardcoded value if the API call fails.
+
+_CLAUDE_MODEL_FALLBACK = "claude-sonnet-4-5"
+_resolved_model = None
+
+
+def get_claude_model(api_key=None):
+    """
+    Return the Claude model to use for all pipeline calls.
+    Resolution order:
+      1. CLAUDE_MODEL env var (allows pinning via .env)
+      2. Latest Sonnet from Anthropic models API
+      3. Hardcoded fallback
+    Result is cached after first call.
+    """
+    global _resolved_model
+    if _resolved_model:
+        return _resolved_model
+
+    env_model = os.environ.get("CLAUDE_MODEL", "").strip()
+    if env_model:
+        logger.info(f"Claude model: {env_model} (from CLAUDE_MODEL env var)")
+        _resolved_model = env_model
+        return _resolved_model
+
+    key = api_key or os.environ.get("CLAUDE_API_KEY", "")
+    if key:
+        try:
+            resp = requests.get(
+                "https://api.anthropic.com/v1/models",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                },
+                timeout=5,
+            )
+            models = resp.json().get("data", [])
+            sonnets = sorted(
+                [m["id"] for m in models if "sonnet" in m["id"].lower()],
+                reverse=True,
+            )
+            if sonnets:
+                _resolved_model = sonnets[0]
+                logger.info(f"Claude model: {_resolved_model} (latest Sonnet from API)")
+                return _resolved_model
+        except Exception as e:
+            logger.warning(f"Could not resolve latest Sonnet from API: {e}")
+
+    logger.warning(f"Claude model: {_CLAUDE_MODEL_FALLBACK} (fallback)")
+    _resolved_model = _CLAUDE_MODEL_FALLBACK
+    return _resolved_model
 
 # ── Last.fm ───────────────────────────────────────────────────────────────────
 LASTFM_ENDPOINT = "https://ws.audioscrobbler.com/2.0/"
@@ -111,6 +163,7 @@ def parse_spotify_csv(file_bytes):
         raise ValueError("No valid audio feature rows found.")
 
     centroid = {f: round(feature_sums[f] / valid, 4) for f in CENTROID_FIELDS}
+
     top_artists = sorted(artist_counts, key=lambda a: -artist_counts[a])[:15]
 
     return centroid, top_artists, valid
@@ -250,18 +303,22 @@ def _build_pass2_prompt(profile, candidates_text, feedback):
 def run_pipeline(profile, claude_client, lastfm_api_key, feedback):
     """
     Execute the two-pass recommendation pipeline.
-    Returns (result_dict, http_status_code).
+    Returns dict: {recommendations: [...], rabbit_holes: [...], pass1_raw: str}
     """
     if not claude_client:
         return {"error": "Claude API not available"}, 503
 
+    # Last.fm similar artists
     similar = fetch_lastfm_similar(lastfm_api_key, profile.get("seed_artists"))
+
+    # Resolve model once per pipeline run
+    model = get_claude_model()
 
     # Pass 1
     p1_prompt = _build_pass1_prompt(profile, similar, feedback)
     try:
         p1_resp = claude_client.messages.create(
-            model=CLAUDE_MODEL,
+            model=model,
             max_tokens=1500,
             messages=[{"role": "user", "content": p1_prompt}],
         )
@@ -274,7 +331,7 @@ def run_pipeline(profile, claude_client, lastfm_api_key, feedback):
     p2_prompt = _build_pass2_prompt(profile, candidates_text, feedback)
     try:
         p2_resp = claude_client.messages.create(
-            model=CLAUDE_MODEL,
+            model=model,
             max_tokens=1500,
             messages=[{"role": "user", "content": p2_prompt}],
         )
@@ -283,9 +340,11 @@ def run_pipeline(profile, claude_client, lastfm_api_key, feedback):
         logger.error(f"Pass 2 error: {e}")
         return {"error": f"Pass 2 Claude error: {str(e)}"}, 500
 
+    # Strip anything before RECOMMENDATIONS as a safety net
     if "RECOMMENDATIONS" in p2_text:
         p2_text = p2_text[p2_text.index("RECOMMENDATIONS"):]
 
+    # Parse output
     recommendations = []
     rabbit_holes = []
     section = None
@@ -313,15 +372,25 @@ def run_pipeline(profile, claude_client, lastfm_api_key, feedback):
     }, 200
 
 
-# ── Custom route registration ─────────────────────────────────────────────────
+# ── Custom routes — registered via app.py's before_first_request or directly ──
+# These are imported in a register_routes() call from app.py if it exists,
+# or wired via a Flask Blueprint. For simplicity under the template pattern,
+# we expose a register() function that app.py can call after creating the app.
 
 def register_routes(app, claude_client_ref):
     """
     Register playlistrec-specific API routes on the Flask app.
-    Called automatically by app.py at startup.
+    Call this from app.py after create_app().
+
+    Usage in app.py:
+        from page_handlers import register_routes
+        register_routes(app, lambda: claude_client)
     """
     import db as _db
-    _db.init_db()  # idempotent — creates tables if not present
+    _db.init_db()  # idempotent — safe to call here; creates tables if not present
+
+    # Resolve and log the Claude model at startup rather than on first request
+    get_claude_model()
 
     lastfm_key = os.environ.get("LASTFM_API_KEY", "")
 
@@ -381,12 +450,15 @@ def register_routes(app, claude_client_ref):
             return jsonify({"error": "Profile not found"}), 404
         if "csv_file" not in request.files:
             return jsonify({"error": "No csv_file in request"}), 400
+
         f = request.files["csv_file"]
         try:
             centroid, top_artists, track_count = parse_spotify_csv(f.read())
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
+
         _db.update_profile(pid, centroid=centroid)
+
         return jsonify({
             "centroid": centroid,
             "top_artists": top_artists,
@@ -438,6 +510,7 @@ def register_routes(app, claude_client_ref):
             return jsonify({"error": "Profile not found"}), 404
         if not profile.get("centroid"):
             return jsonify({"error": "Profile has no centroid — upload a CSV first"}), 400
+
         feedback = _db.get_feedback(int(pid))
         result, status = run_pipeline(
             profile, claude_client_ref(), lastfm_key, feedback
