@@ -338,6 +338,10 @@ def register_routes(app, claude_client_ref):
     # Resolve and log the Claude model at startup rather than on first request
     get_claude_model()
 
+    # Register Spotify OAuth routes
+    from spotify_auth import register_spotify_routes
+    register_spotify_routes(app)
+
     lastfm_key = os.environ.get("LASTFM_API_KEY", "")
 
     # ── Profile CRUD ──────────────────────────────────────────────────────────
