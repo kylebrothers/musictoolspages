@@ -5,6 +5,7 @@ Schema:
   profiles          — named listener profiles
   feedback          — per-song yes/maybe/no ratings, per profile
   maybe_notes       — free text notes on maybe-rated songs
+  spotify_tokens    — Spotify OAuth tokens (single-user, user_id=1)
 
 The database file lives on the NAS volume at /app/database/playlistrec.db
 so it survives container rebuilds.
@@ -70,6 +71,14 @@ def init_db():
                 note        TEXT NOT NULL DEFAULT '',
                 updated_at  TEXT DEFAULT (datetime('now')),
                 UNIQUE(profile_id, track_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS spotify_tokens (
+                user_id       INTEGER PRIMARY KEY,
+                access_token  TEXT NOT NULL,
+                refresh_token TEXT NOT NULL,
+                expires_at    REAL NOT NULL,   -- Unix timestamp
+                updated_at    TEXT DEFAULT (datetime('now'))
             );
         """)
     logger.info(f"Database initialised at {DB_PATH}")
@@ -225,4 +234,38 @@ def set_maybe_note(profile_id, track_key, note):
                ON CONFLICT(profile_id, track_key) DO UPDATE SET note = excluded.note,
                updated_at = datetime('now')""",
             (profile_id, track_key, note)
+        )
+
+
+# ── Spotify tokens ────────────────────────────────────────────────────────────
+
+def get_spotify_token(user_id):
+    """Return token row dict or None."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM spotify_tokens WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_spotify_token(user_id, access_token, refresh_token, expires_at):
+    """Upsert Spotify tokens for a user."""
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO spotify_tokens (user_id, access_token, refresh_token, expires_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 access_token  = excluded.access_token,
+                 refresh_token = excluded.refresh_token,
+                 expires_at    = excluded.expires_at,
+                 updated_at    = datetime('now')""",
+            (user_id, access_token, refresh_token, expires_at)
+        )
+
+
+def delete_spotify_token(user_id):
+    """Remove Spotify tokens for a user (disconnect)."""
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM spotify_tokens WHERE user_id = ?", (user_id,)
         )
