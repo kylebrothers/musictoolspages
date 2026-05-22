@@ -44,7 +44,7 @@ def _fetch_all_playlist_tracks(playlist_id):
     Returns list of dicts: {track_name, artist_name, artist_names: [...]}
     """
     tracks = []
-    url = f"/playlists/{playlist_id}/tracks"
+    url = f"/playlists/{playlist_id}/items"
     params = {"limit": 100}
 
     while url:
@@ -52,7 +52,7 @@ def _fetch_all_playlist_tracks(playlist_id):
         if err:
             raise RuntimeError(f"Spotify error fetching tracks: {err}")
         for item in data.get("items", []):
-            t = item.get("track")
+            t = item.get("item")  # Feb 2026: renamed from "track" to "item"
             if not t or not t.get("name"):
                 continue
             artist_names = [a["name"] for a in t.get("artists", []) if a.get("name")]
@@ -475,7 +475,7 @@ def register_routes(app, claude_client_ref):
                     playlists.append({
                         "id":     item["id"],
                         "name":   item["name"],
-                        "tracks": (item.get("tracks") or {}).get("total", 0),
+                        "tracks": (item.get("items") or {}).get("total", 0),
                         "image":  (item.get("images") or [{}])[0].get("url"),
                     })
             next_url = data.get("next")
@@ -583,7 +583,7 @@ def register_routes(app, claude_client_ref):
 
             query = f"track:{title} artist:{artist}" if artist else f"track:{title}"
             search_data, err = spotify_get("/search", params={
-                "q": query, "type": "track", "limit": 1
+                "q": query, "type": "track", "limit": 10
             })
             if err or not search_data:
                 failures.append({"track": track_str, "reason": err or "no results"})
@@ -603,7 +603,7 @@ def register_routes(app, claude_client_ref):
         added = 0
         for i in range(0, len(uris), 100):
             batch = uris[i:i + 100]
-            _, err = spotify_post(f"/playlists/{playlist_id}/tracks", {"uris": batch})
+            _, err = spotify_post(f"/playlists/{playlist_id}/items", {"uris": batch})
             if err:
                 return jsonify({"error": f"Spotify error adding tracks: {err}"}), 502
             added += len(batch)
