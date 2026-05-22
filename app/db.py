@@ -46,13 +46,15 @@ def init_db():
     with get_db() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS profiles (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                name            TEXT UNIQUE NOT NULL,
-                centroid        TEXT,           -- JSON: {energy, danceability, ...}
-                seed_artists    TEXT,           -- JSON: [artist, ...]
-                disliked_artists TEXT,          -- JSON: [artist, ...]
-                created_at      TEXT DEFAULT (datetime('now')),
-                updated_at      TEXT DEFAULT (datetime('now'))
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                name                TEXT UNIQUE NOT NULL,
+                centroid            TEXT,           -- JSON: {energy, danceability, ...} (legacy)
+                seed_artists        TEXT,           -- JSON: [artist, ...]
+                disliked_artists    TEXT,           -- JSON: [artist, ...]
+                spotify_playlist_id TEXT,           -- Spotify playlist ID linked to profile
+                sonic_profile       TEXT,           -- Claude-generated sonic description
+                created_at          TEXT DEFAULT (datetime('now')),
+                updated_at          TEXT DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS feedback (
@@ -81,7 +83,27 @@ def init_db():
                 updated_at    TEXT DEFAULT (datetime('now'))
             );
         """)
+
+    # Migrate existing databases: add new columns if absent
+    _migrate(conn_factory=get_db)
     logger.info(f"Database initialised at {DB_PATH}")
+
+
+def _migrate(conn_factory):
+    """Add new columns to existing tables without dropping data."""
+    migrations = [
+        ("profiles", "spotify_playlist_id", "TEXT"),
+        ("profiles", "sonic_profile",       "TEXT"),
+    ]
+    with conn_factory() as conn:
+        existing = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(profiles)").fetchall()
+        }
+        for table, col, col_type in migrations:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                logger.info(f"Migration: added {table}.{col}")
 
 
 # ── Profiles ──────────────────────────────────────────────────────────────────
@@ -130,8 +152,11 @@ def create_profile(name, centroid=None, seed_artists=None, disliked_artists=None
 
 
 def update_profile(profile_id, **kwargs):
-    """Update any combination of centroid, seed_artists, disliked_artists, name."""
-    allowed = {"name", "centroid", "seed_artists", "disliked_artists"}
+    """Update any combination of profile fields."""
+    allowed = {
+        "name", "centroid", "seed_artists", "disliked_artists",
+        "spotify_playlist_id", "sonic_profile",
+    }
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
         return
@@ -172,6 +197,7 @@ def _parse_profile(row):
                 p[field] = None if field == "centroid" else []
         else:
             p[field] = None if field == "centroid" else []
+    # sonic_profile and spotify_playlist_id are plain strings — no JSON parsing
     return p
 
 
