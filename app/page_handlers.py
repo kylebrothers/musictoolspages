@@ -45,7 +45,7 @@ def _fetch_all_playlist_tracks(playlist_id):
     """
     tracks = []
     url = f"/playlists/{playlist_id}/tracks"
-    params = {"fields": "items(track(name,artists(name))),next", "limit": 100}
+    params = {"limit": 100}
 
     while url:
         data, err = spotify_get(url, params=params)
@@ -475,7 +475,7 @@ def register_routes(app, claude_client_ref):
                     playlists.append({
                         "id":     item["id"],
                         "name":   item["name"],
-                        "tracks": item.get("tracks", {}).get("total", 0),
+                        "tracks": (item.get("tracks") or {}).get("total", 0),
                         "image":  (item.get("images") or [{}])[0].get("url"),
                     })
             next_url = data.get("next")
