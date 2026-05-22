@@ -4,12 +4,6 @@
 
 {% block styles %}
 <style>
-  /* ── Centroid bar indicators ── */
-  .centroid-bar-wrap { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-  .centroid-label    { width: 120px; font-size: 0.78rem; color: #6c757d; flex-shrink: 0; }
-  .centroid-bar-bg   { flex: 1; height: 6px; background: #e9ecef; border-radius: 3px; }
-  .centroid-bar-fill { height: 6px; background: var(--bs-primary); border-radius: 3px; transition: width .4s; }
-
   /* ── Pipeline step pills ── */
   .pipeline-steps { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
   .step-pill {
@@ -23,19 +17,18 @@
 
   /* ── Source pills ── */
   .source-pills { display: flex; gap: 6px; flex-wrap: wrap; }
-  .source-pill  {
+  .source-pill {
     font-size: 0.72rem; padding: 2px 10px; border-radius: 20px;
     background: #e9f5ff; color: #0a58ca; border: 1px solid #b8d4f0;
   }
 
   /* ── Recommendation cards ── */
   .rec-card { border-left: 4px solid #dee2e6; transition: border-color .2s; }
-  .rec-card.feedback-yes    { border-left-color: #198754; }
-  .rec-card.feedback-maybe  { border-left-color: #ffc107; }
-  .rec-card.feedback-no     { border-left-color: #dc3545; }
-  .rec-card .rec-meta { font-size: 0.78rem; color: #6c757d; }
+  .rec-card.feedback-yes   { border-left-color: #198754; }
+  .rec-card.feedback-maybe { border-left-color: #ffc107; }
+  .rec-card.feedback-no    { border-left-color: #dc3545; }
+  .rec-card .rec-meta   { font-size: 0.78rem; color: #6c757d; }
   .rec-card .rec-reason { font-size: 0.85rem; font-style: italic; color: #555; }
-
   .feedback-btn-group .btn { font-size: 0.8rem; padding: 3px 10px; }
   .maybe-note-field { display: none; margin-top: 6px; }
   .maybe-note-field.visible { display: block; }
@@ -47,12 +40,23 @@
     padding: 3px 12px; font-size: 0.8rem; margin: 3px;
   }
 
-  /* ── Profile selector header ── */
-  #profileHeader { background: #f8f9fa; border-bottom: 1px solid #dee2e6; padding: 12px 16px; }
-  #noProfileMsg  { color: #6c757d; font-style: italic; }
+  /* ── Sonic profile panel ── */
+  #sonicProfileText {
+    font-size: 0.82rem; color: #444; line-height: 1.5;
+    max-height: 140px; overflow-y: auto;
+    background: #f8f9fa; border-radius: 6px; padding: 8px 10px;
+  }
 
-  /* ── Session feedback summary ── */
+  /* ── Spotify status bar ── */
+  #spotifyBar { font-size: 0.82rem; }
+
+  /* ── Profile selector ── */
+  #noProfileMsg { color: #6c757d; font-style: italic; }
   #sessionSummary .badge { font-size: 0.78rem; }
+
+  /* ── Spotify green ── */
+  .btn-spotify { background: #1DB954; border-color: #1DB954; color: #fff; }
+  .btn-spotify:hover { background: #17a349; border-color: #17a349; color: #fff; }
 </style>
 {% endblock %}
 
@@ -66,8 +70,14 @@
         <h2 class="fw-bold text-primary">
           <i class="fas fa-music me-2"></i>Playlist Rec
         </h2>
-        <p class="text-muted mb-0">Two-pass AI recommendation engine. Select a profile, then run.</p>
+        <p class="text-muted mb-0">Two-pass AI recommendation engine. Select a profile, link a playlist, then run.</p>
         <hr class="text-muted mt-2">
+      </div>
+
+      {# ── Spotify connection bar ── #}
+      <div id="spotifyBar" class="alert py-2 mb-3 d-flex align-items-center justify-content-between" role="alert">
+        <span id="spotifyStatusText"><i class="fab fa-spotify me-2"></i>Checking Spotify…</span>
+        <div id="spotifyActions"></div>
       </div>
 
       <div class="row g-3">
@@ -96,28 +106,50 @@
                 </button>
               </div>
 
-              {# ── Centroid panel ── #}
-              <div id="centroidPanel" class="d-none">
-                <div class="d-flex align-items-center justify-content-between mb-2">
-                  <span class="fw-semibold" style="font-size:.85rem">Audio Centroid</span>
-                  <button class="btn btn-sm btn-outline-secondary py-0 px-2" id="uploadCsvBtn" style="font-size:.75rem">
-                    <i class="fas fa-upload me-1"></i>Upload CSV
-                  </button>
-                </div>
-                <div id="centroidBars"></div>
-                <input type="file" id="csvFileInput" accept=".csv" class="d-none">
-                <div id="csvUploadStatus" class="mt-1" style="font-size:.75rem"></div>
-              </div>
-
-              <div id="noCentroidMsg" class="text-muted d-none" style="font-size:.82rem">
-                <i class="fas fa-info-circle me-1"></i>No audio data yet.
-                <button class="btn btn-sm btn-link p-0 ms-1" id="uploadCsvBtn2" style="font-size:.82rem">Upload Spotify CSV</button>
-                to compute centroid.
-                <input type="file" id="csvFileInput2" accept=".csv" class="d-none">
-              </div>
-
               <div id="noProfileMsg" class="text-center py-2">
                 <i class="fas fa-arrow-up me-1"></i> Select or create a profile.
+              </div>
+
+              {# ── Playlist panel ── #}
+              <div id="playlistPanel" class="d-none">
+
+                {# Linked playlist status #}
+                <div id="linkedPlaylistInfo" class="d-none mb-2">
+                  <div class="d-flex align-items-center justify-content-between">
+                    <span class="fw-semibold" style="font-size:.85rem"><i class="fab fa-spotify me-1 text-success"></i>Linked Playlist</span>
+                    <button class="btn btn-sm btn-outline-secondary py-0 px-2" id="changePlaylistBtn" style="font-size:.72rem">Change</button>
+                  </div>
+                  <div id="linkedPlaylistName" class="text-muted mt-1" style="font-size:.82rem"></div>
+                </div>
+
+                {# Playlist selector (shown when no playlist linked, or changing) #}
+                <div id="playlistSelectorWrap">
+                  <label class="form-label mb-1" style="font-size:.82rem; font-weight:600">Link Spotify Playlist</label>
+                  <select id="playlistSelect" class="form-select form-select-sm mb-2">
+                    <option value="">— select playlist —</option>
+                  </select>
+                  <button class="btn btn-sm btn-spotify w-100" id="linkPlaylistBtn" disabled>
+                    <i class="fab fa-spotify me-1"></i>Link &amp; Generate Sonic Profile
+                  </button>
+                  <div id="linkStatus" class="mt-1" style="font-size:.75rem"></div>
+                </div>
+
+                {# Sonic profile display #}
+                <div id="sonicProfilePanel" class="d-none mt-3">
+                  <div class="d-flex align-items-center justify-content-between mb-1">
+                    <span class="fw-semibold" style="font-size:.85rem"><i class="fas fa-waveform me-1 text-primary"></i>Sonic Profile</span>
+                    <button class="btn btn-sm btn-outline-primary py-0 px-2" id="refreshProfileBtn" style="font-size:.72rem">
+                      <i class="fas fa-sync-alt me-1"></i>Refresh Profile
+                    </button>
+                  </div>
+                  <div id="sonicProfileText"></div>
+                </div>
+
+              </div>{# /playlistPanel #}
+
+              {# Shown when Spotify not connected and profile selected #}
+              <div id="noSpotifyMsg" class="text-muted d-none" style="font-size:.82rem">
+                <i class="fas fa-info-circle me-1"></i>Connect Spotify above to link a playlist.
               </div>
 
             </div>
@@ -198,12 +230,20 @@
             <div class="source-pills" id="sourcePills"></div>
           </div>
 
+          {# ── Add to Spotify button (shown when ≥1 yes-rated track and playlist linked) ── #}
+          <div id="addToSpotifyRow" class="d-none mb-3">
+            <button class="btn btn-spotify w-100" id="addToSpotifyBtn">
+              <i class="fab fa-spotify me-2"></i>Add Approved Tracks to Playlist
+            </button>
+            <div id="addToSpotifyStatus" class="mt-1" style="font-size:.82rem"></div>
+          </div>
+
           {# ── Recommendations ── #}
           <div id="recsContainer" class="d-none">
             <h5 class="fw-semibold mb-2"><i class="fas fa-list me-2 text-primary"></i>Recommendations</h5>
             <div id="recCards"></div>
 
-            <h5 class="fw-semibold mt-4 mb-2"><i class="fas fa-rabbit me-2 text-purple" style="color:#6f42c1"></i>Artist Rabbit Holes</h5>
+            <h5 class="fw-semibold mt-4 mb-2" style="color:#6f42c1"><i class="fas fa-spider me-2"></i>Artist Rabbit Holes</h5>
             <div id="rabbitHoles"></div>
           </div>
 
@@ -229,7 +269,7 @@
         <button type="button" class="btn-close btn-sm" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
-        <input type="text" id="newProfileName" class="form-control form-control-sm" placeholder="Profile name (e.g. Loud)">
+        <input type="text" id="newProfileName" class="form-control form-control-sm" placeholder="Profile name (e.g. Kyle)">
         <div id="newProfileError" class="text-danger mt-1 d-none" style="font-size:.8rem"></div>
       </div>
       <div class="modal-footer py-2">
@@ -243,38 +283,78 @@
 
 {% block scripts %}
 <script>
-// ── State ────────────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
 const state = {
-  profiles: [],
-  activeProfile: null,   // full profile object
-  feedback: {},          // {track_key: rating}
-  notes: {},             // {track_key: note}
+  profiles:        [],
+  activeProfile:   null,
+  feedback:        {},
+  notes:           {},
+  spotifyConnected: false,
+  playlists:       [],
+  currentRecs:     [],   // raw recommendation strings from last run
 };
 
-// ── DOM refs ─────────────────────────────────────────────────────────────────
-const profileSelect   = document.getElementById('profileSelect');
-const deleteProfileBtn= document.getElementById('deleteProfileBtn');
-const centroidPanel   = document.getElementById('centroidPanel');
-const noCentroidMsg   = document.getElementById('noCentroidMsg');
-const noProfileMsg    = document.getElementById('noProfileMsg');
-const seedCard        = document.getElementById('seedCard');
-const dislikedCard    = document.getElementById('dislikedCard');
-const sessionSummary  = document.getElementById('sessionSummary');
-const runBtn          = document.getElementById('runBtn');
-const recsContainer   = document.getElementById('recsContainer');
-const idleState       = document.getElementById('idleState');
+// ── DOM refs ──────────────────────────────────────────────────────────────────
+const profileSelect    = document.getElementById('profileSelect');
+const deleteProfileBtn = document.getElementById('deleteProfileBtn');
+const noProfileMsg     = document.getElementById('noProfileMsg');
+const playlistPanel    = document.getElementById('playlistPanel');
+const noSpotifyMsg     = document.getElementById('noSpotifyMsg');
+const seedCard         = document.getElementById('seedCard');
+const dislikedCard     = document.getElementById('dislikedCard');
+const sessionSummary   = document.getElementById('sessionSummary');
+const runBtn           = document.getElementById('runBtn');
+const recsContainer    = document.getElementById('recsContainer');
+const idleState        = document.getElementById('idleState');
 
 // ── API helpers ───────────────────────────────────────────────────────────────
 async function api(method, path, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(path, opts);
-  return res.json();
+  try {
+    const res = await fetch(path, opts);
+    return await res.json();
+  } catch (e) {
+    return { error: e.message };
+  }
 }
 
-async function apiForm(path, formData) {
-  const res = await fetch(path, { method: 'POST', body: formData });
-  return res.json();
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) { return escHtml(s); }
+
+// ── Spotify status bar ────────────────────────────────────────────────────────
+async function checkSpotifyStatus() {
+  const bar     = document.getElementById('spotifyBar');
+  const textEl  = document.getElementById('spotifyStatusText');
+  const actEl   = document.getElementById('spotifyActions');
+  const data    = await api('GET', '/spotify/status');
+
+  if (data.connected) {
+    state.spotifyConnected = true;
+    bar.className = 'alert alert-success py-2 mb-3 d-flex align-items-center justify-content-between';
+    textEl.innerHTML = `<i class="fab fa-spotify me-2"></i>Connected as <strong>${escHtml(data.display_name)}</strong>`;
+    actEl.innerHTML  = `<a href="/spotify/logout" class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:.75rem">Disconnect</a>`;
+    await loadSpotifyPlaylists();
+  } else {
+    state.spotifyConnected = false;
+    bar.className = 'alert alert-warning py-2 mb-3 d-flex align-items-center justify-content-between';
+    textEl.innerHTML = `<i class="fab fa-spotify me-2"></i>Spotify not connected`;
+    actEl.innerHTML  = `<a href="/spotify/login" class="btn btn-sm btn-spotify py-0 px-2" style="font-size:.75rem"><i class="fab fa-spotify me-1"></i>Connect</a>`;
+  }
+  renderProfileUI();
+}
+
+// ── Load Spotify playlists ────────────────────────────────────────────────────
+async function loadSpotifyPlaylists() {
+  const data = await api('GET', '/api/spotify/playlists');
+  state.playlists = data.playlists || [];
+  const sel = document.getElementById('playlistSelect');
+  sel.innerHTML = '<option value="">— select playlist —</option>' +
+    state.playlists.map(p =>
+      `<option value="${escAttr(p.id)}">${escHtml(p.name)} (${p.tracks} tracks)</option>`
+    ).join('');
 }
 
 // ── Load profiles ─────────────────────────────────────────────────────────────
@@ -282,7 +362,7 @@ async function loadProfiles() {
   const data = await api('GET', '/api/profiles');
   state.profiles = data.profiles || [];
   profileSelect.innerHTML = '<option value="">— select profile —</option>' +
-    state.profiles.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+    state.profiles.map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
   if (state.activeProfile) {
     profileSelect.value = state.activeProfile.id;
   }
@@ -297,7 +377,6 @@ async function selectProfile(pid) {
   }
   const data = await api('GET', `/api/profiles/${pid}`);
   state.activeProfile = data.profile;
-  // Load feedback
   const fb = await api('GET', `/api/profiles/${pid}/feedback`);
   state.feedback = fb.feedback || {};
   state.notes    = fb.notes    || {};
@@ -309,56 +388,139 @@ profileSelect.addEventListener('change', () => selectProfile(profileSelect.value
 
 // ── Render profile UI ─────────────────────────────────────────────────────────
 function renderProfileUI() {
-  const p = state.activeProfile;
+  const p   = state.activeProfile;
   const has = !!p;
 
   noProfileMsg.classList.toggle('d-none', has);
   deleteProfileBtn.disabled = !has;
   seedCard.classList.toggle('d-none', !has);
   dislikedCard.classList.toggle('d-none', !has);
-  runBtn.disabled = !has;
+  runBtn.disabled = !has || !p?.sonic_profile;
 
   if (!has) {
-    centroidPanel.classList.add('d-none');
-    noCentroidMsg.classList.add('d-none');
+    playlistPanel.classList.add('d-none');
+    noSpotifyMsg.classList.add('d-none');
     sessionSummary.classList.add('d-none');
     return;
   }
 
   sessionSummary.classList.remove('d-none');
 
-  if (p.centroid) {
-    centroidPanel.classList.remove('d-none');
-    noCentroidMsg.classList.add('d-none');
-    renderCentroid(p.centroid);
+  if (state.spotifyConnected) {
+    playlistPanel.classList.remove('d-none');
+    noSpotifyMsg.classList.add('d-none');
+    renderPlaylistPanel(p);
   } else {
-    centroidPanel.classList.add('d-none');
-    noCentroidMsg.classList.remove('d-none');
+    playlistPanel.classList.add('d-none');
+    noSpotifyMsg.classList.remove('d-none');
   }
 
-  renderTagList('seedArtistTags', p.seed_artists || [], 'seed');
+  renderTagList('seedArtistTags',     p.seed_artists     || [], 'seed');
   renderTagList('dislikedArtistTags', p.disliked_artists || [], 'disliked');
 }
 
-// ── Centroid bars ─────────────────────────────────────────────────────────────
-function renderCentroid(centroid) {
-  const container = document.getElementById('centroidBars');
-  const ranges = {
-    Energy: [0,1], Danceability: [0,1], Valence: [0,1],
-    Acousticness: [0,1], Instrumentalness: [0,1],
-    Speechiness: [0,1], Loudness: [-60,0], Tempo: [60,220],
-  };
-  container.innerHTML = Object.entries(centroid).map(([k, v]) => {
-    const [min, max] = ranges[k] || [0,1];
-    const pct = Math.min(100, Math.max(0, (v - min) / (max - min) * 100));
-    const display = k === 'Loudness' ? `${v} dB` : k === 'Tempo' ? `${v} BPM` : v.toFixed(3);
-    return `<div class="centroid-bar-wrap">
-      <span class="centroid-label">${k}</span>
-      <div class="centroid-bar-bg"><div class="centroid-bar-fill" style="width:${pct}%"></div></div>
-      <span style="font-size:.72rem;color:#6c757d;width:60px;text-align:right">${display}</span>
-    </div>`;
-  }).join('');
+// ── Render playlist panel ─────────────────────────────────────────────────────
+function renderPlaylistPanel(p) {
+  const linkedInfo    = document.getElementById('linkedPlaylistInfo');
+  const selectorWrap  = document.getElementById('playlistSelectorWrap');
+  const sonicPanel    = document.getElementById('sonicProfilePanel');
+  const sonicText     = document.getElementById('sonicProfileText');
+  const linkedName    = document.getElementById('linkedPlaylistName');
+  const linkBtn       = document.getElementById('linkPlaylistBtn');
+
+  if (p.spotify_playlist_id) {
+    // Show linked state
+    linkedInfo.classList.remove('d-none');
+    selectorWrap.classList.add('d-none');
+
+    const playlist = state.playlists.find(pl => pl.id === p.spotify_playlist_id);
+    linkedName.textContent = playlist ? playlist.name : p.spotify_playlist_id;
+
+    // Sync the select to the linked playlist for refresh
+    document.getElementById('playlistSelect').value = p.spotify_playlist_id;
+  } else {
+    linkedInfo.classList.add('d-none');
+    selectorWrap.classList.remove('d-none');
+  }
+
+  if (p.sonic_profile) {
+    sonicPanel.classList.remove('d-none');
+    sonicText.textContent = p.sonic_profile;
+  } else {
+    sonicPanel.classList.add('d-none');
+  }
+
+  // Enable link button when a playlist is selected
+  const sel = document.getElementById('playlistSelect');
+  linkBtn.disabled = !sel.value;
+  sel.addEventListener('change', () => { linkBtn.disabled = !sel.value; });
 }
+
+// ── Change playlist button ────────────────────────────────────────────────────
+document.getElementById('changePlaylistBtn').addEventListener('click', () => {
+  document.getElementById('linkedPlaylistInfo').classList.add('d-none');
+  document.getElementById('playlistSelectorWrap').classList.remove('d-none');
+});
+
+// ── Link playlist ─────────────────────────────────────────────────────────────
+document.getElementById('linkPlaylistBtn').addEventListener('click', async () => {
+  const p = state.activeProfile;
+  if (!p) return;
+  const playlistId = document.getElementById('playlistSelect').value;
+  if (!playlistId) return;
+
+  const btn      = document.getElementById('linkPlaylistBtn');
+  const statusEl = document.getElementById('linkStatus');
+  btn.disabled   = true;
+  btn.innerHTML  = '<span class="spinner-border spinner-border-sm me-1"></span>Generating sonic profile…';
+  statusEl.textContent = '';
+
+  const data = await api('POST', `/api/spotify/playlists/${playlistId}/link/${p.id}`);
+
+  btn.innerHTML = '<i class="fab fa-spotify me-1"></i>Link & Generate Sonic Profile';
+
+  if (data.error) {
+    btn.disabled   = false;
+    statusEl.innerHTML = `<span class="text-danger">⚠ ${escHtml(data.error)}</span>`;
+    return;
+  }
+
+  statusEl.innerHTML = `<span class="text-success">✓ ${data.track_count} tracks, ${data.artist_count} artists processed.</span>`;
+  state.activeProfile = data.profile;
+
+  if (!state.activeProfile.seed_artists?.length && data.top_artists?.length) {
+    state.activeProfile.seed_artists = data.top_artists.slice(0, 8);
+    renderTagList('seedArtistTags', state.activeProfile.seed_artists, 'seed');
+    await api('PUT', `/api/profiles/${p.id}`, { seed_artists: state.activeProfile.seed_artists });
+  }
+
+  renderProfileUI();
+});
+
+// ── Refresh sonic profile ─────────────────────────────────────────────────────
+document.getElementById('refreshProfileBtn').addEventListener('click', async () => {
+  const p = state.activeProfile;
+  if (!p?.spotify_playlist_id) return;
+
+  const btn    = document.getElementById('refreshProfileBtn');
+  const orig   = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Refreshing…';
+
+  const data = await api('POST', `/api/spotify/playlists/${p.spotify_playlist_id}/refresh-profile/${p.id}`);
+
+  btn.disabled = false;
+  btn.innerHTML = orig;
+
+  if (data.error) {
+    alert('Refresh failed: ' + data.error);
+    return;
+  }
+
+  state.activeProfile = data.profile;
+  document.getElementById('sonicProfileText').textContent = data.sonic_profile;
+  renderProfileUI();
+});
 
 // ── Artist tag lists ──────────────────────────────────────────────────────────
 function renderTagList(containerId, artists, type) {
@@ -381,7 +543,7 @@ function removeArtist(type, idx) {
 
 function addArtistFromInput(inputId, type) {
   const input = document.getElementById(inputId);
-  const val = input.value.trim();
+  const val   = input.value.trim();
   if (!val || !state.activeProfile) return;
   const field = type === 'seed' ? 'seed_artists' : 'disliked_artists';
   if (!state.activeProfile[field].includes(val)) {
@@ -391,7 +553,7 @@ function addArtistFromInput(inputId, type) {
   input.value = '';
 }
 
-document.getElementById('addSeedBtn').addEventListener('click', () => addArtistFromInput('seedArtistInput', 'seed'));
+document.getElementById('addSeedBtn').addEventListener('click',     () => addArtistFromInput('seedArtistInput', 'seed'));
 document.getElementById('addDislikedBtn').addEventListener('click', () => addArtistFromInput('dislikedArtistInput', 'disliked'));
 
 ['seedArtistInput','dislikedArtistInput'].forEach(id => {
@@ -406,12 +568,12 @@ async function saveArtists(field) {
   await api('PUT', `/api/profiles/${p.id}`, { [field]: p[field] });
 }
 
-document.getElementById('saveSeedBtn').addEventListener('click', () => saveArtists('seed_artists'));
+document.getElementById('saveSeedBtn').addEventListener('click',     () => saveArtists('seed_artists'));
 document.getElementById('saveDislikedBtn').addEventListener('click', () => saveArtists('disliked_artists'));
 
-// ── Create profile ─────────────────────────────────────────────────────────────
+// ── Create profile ────────────────────────────────────────────────────────────
 document.getElementById('createProfileBtn').addEventListener('click', async () => {
-  const name = document.getElementById('newProfileName').value.trim();
+  const name  = document.getElementById('newProfileName').value.trim();
   const errEl = document.getElementById('newProfileError');
   if (!name) { errEl.textContent = 'Name required.'; errEl.classList.remove('d-none'); return; }
   errEl.classList.add('d-none');
@@ -435,49 +597,25 @@ deleteProfileBtn.addEventListener('click', async () => {
   resetResults();
 });
 
-// ── CSV upload ────────────────────────────────────────────────────────────────
-function handleCsvInput(fileInput) {
-  fileInput.addEventListener('change', async () => {
-    const file = fileInput.files[0];
-    if (!file || !state.activeProfile) return;
-    const statusEl = document.getElementById('csvUploadStatus');
-    statusEl.textContent = 'Uploading…';
-    const fd = new FormData();
-    fd.append('csv_file', file);
-    const data = await apiForm(`/api/profiles/${state.activeProfile.id}/csv`, fd);
-    if (data.error) {
-      statusEl.textContent = '⚠ ' + data.error;
-      return;
-    }
-    state.activeProfile.centroid = data.centroid;
-    // Pre-populate seed artists if none exist
-    if ((!state.activeProfile.seed_artists || !state.activeProfile.seed_artists.length) && data.top_artists) {
-      state.activeProfile.seed_artists = data.top_artists.slice(0, 8);
-      renderTagList('seedArtistTags', state.activeProfile.seed_artists, 'seed');
-      await api('PUT', `/api/profiles/${state.activeProfile.id}`, { seed_artists: state.activeProfile.seed_artists });
-    }
-    statusEl.textContent = `✓ ${data.track_count} tracks processed.`;
-    renderProfileUI();
-    fileInput.value = '';
-  });
-}
-
-document.getElementById('uploadCsvBtn').addEventListener('click', () => document.getElementById('csvFileInput').click());
-document.getElementById('uploadCsvBtn2').addEventListener('click', () => document.getElementById('csvFileInput2').click());
-handleCsvInput(document.getElementById('csvFileInput'));
-handleCsvInput(document.getElementById('csvFileInput2'));
-
 // ── Pipeline step helpers ─────────────────────────────────────────────────────
 function setStep(id, status) {
-  const icons = { idle: '○', active: '▶', done: '✓', error: '✗' };
+  const icons  = { idle: '○', active: '▶', done: '✓', error: '✗' };
+  const labels = { lastfm: 'Last.fm', pass1: 'Pass 1 (candidates)', pass2: 'Pass 2 (filter)', done: 'Done' };
   const el = document.getElementById(`step-${id}`);
-  const labels = { 'lastfm': 'Last.fm', 'pass1': 'Pass 1 (candidates)', 'pass2': 'Pass 2 (filter)', 'done': 'Done' };
   el.textContent = `${icons[status]} ${labels[id]}`;
-  el.className = 'step-pill' + (status === 'idle' ? '' : ` ${status === 'active' ? 'active' : status === 'done' ? 'done' : 'error'}`);
+  el.className = 'step-pill' + (status === 'idle' ? '' : ` ${status}`);
 }
 
 function resetSteps() {
   ['lastfm','pass1','pass2','done'].forEach(s => setStep(s, 'idle'));
+}
+
+function resetResults() {
+  recsContainer.classList.add('d-none');
+  idleState.classList.remove('d-none');
+  document.getElementById('sourcePillsRow').classList.add('d-none');
+  document.getElementById('addToSpotifyRow').classList.add('d-none');
+  state.currentRecs = [];
 }
 
 // ── Run pipeline ──────────────────────────────────────────────────────────────
@@ -485,14 +623,13 @@ runBtn.addEventListener('click', async () => {
   const p = state.activeProfile;
   if (!p) return;
 
-  runBtn.disabled = true;
+  runBtn.disabled  = true;
   runBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Running…';
   document.getElementById('runError').classList.add('d-none');
   resetSteps();
   resetResults();
 
   setStep('lastfm', 'active');
-  // Small visual delay between steps
   await pause(300);
   setStep('lastfm', 'done');
   setStep('pass1', 'active');
@@ -523,25 +660,28 @@ runBtn.addEventListener('click', async () => {
   setStep('pass2', 'done');
   setStep('done', 'done');
 
-  // Source pills
   const pills = [
-    `Spotify centroid`,
+    `Sonic profile`,
     `Last.fm: ${data.lastfm_similar_count || 0} similar artists`,
     `${data.recommendations?.length || 0} recommendations`,
     `${Object.keys(state.feedback).length} feedback signals`,
   ];
-  document.getElementById('sourcePills').innerHTML = pills.map(t => `<span class="source-pill">${t}</span>`).join('');
+  if (data.playlist_tracks_excluded > 0) {
+    pills.push(`${data.playlist_tracks_excluded} playlist tracks excluded`);
+  }
+  document.getElementById('sourcePills').innerHTML = pills.map(t => `<span class="source-pill">${escHtml(t)}</span>`).join('');
   document.getElementById('sourcePillsRow').classList.remove('d-none');
 
-  renderRecommendations(data.recommendations || [], data.rabbit_holes || []);
+  state.currentRecs = data.recommendations || [];
+  renderRecommendations(state.currentRecs, data.rabbit_holes || []);
 
-  // Reload feedback for this profile after run
   const fb = await api('GET', `/api/profiles/${p.id}/feedback`);
   state.feedback = fb.feedback || {};
   state.notes    = fb.notes    || {};
   updateFeedbackSummary();
+  updateAddToSpotifyBtn();
 
-  runBtn.disabled = false;
+  runBtn.disabled  = false;
   runBtn.innerHTML = '<i class="fas fa-play me-2"></i>Run Recommendations';
 });
 
@@ -549,7 +689,7 @@ function showRunError(msg) {
   const el = document.getElementById('runError');
   el.textContent = msg;
   el.classList.remove('d-none');
-  runBtn.disabled = false;
+  runBtn.disabled  = false;
   runBtn.innerHTML = '<i class="fas fa-play me-2"></i>Run Recommendations';
 }
 
@@ -562,13 +702,11 @@ function renderRecommendations(recs, rabbitHoles) {
 
   const recCards = document.getElementById('recCards');
   recCards.innerHTML = recs.map((line, i) => {
-    // Parse: "Song Title" – Artist (Year) | features | solo | reason
-    const parts = line.split('|').map(s => s.trim());
+    const parts      = line.split('|').map(s => s.trim());
     const titleArtist = parts[0] || line;
-    const features    = parts[1] || '';
-    const reason      = parts[3] || '';
+    const solo        = parts[1] || '';
+    const reason      = parts[2] || '';
     const trackKey    = titleArtist.replace(/"/g, '').trim();
-
     const currentRating = state.feedback[trackKey] || '';
     const note = state.notes[trackKey] || '';
 
@@ -577,7 +715,7 @@ function renderRecommendations(recs, rabbitHoles) {
         <div class="d-flex justify-content-between align-items-start gap-2">
           <div>
             <div class="fw-semibold">${escHtml(titleArtist)}</div>
-            <div class="rec-meta">${escHtml(features)}</div>
+            ${solo ? `<div class="rec-meta">${escHtml(solo)}</div>` : ''}
             ${reason ? `<div class="rec-reason">${escHtml(reason)}</div>` : ''}
           </div>
           <div class="feedback-btn-group d-flex gap-1 flex-shrink-0">
@@ -587,115 +725,133 @@ function renderRecommendations(recs, rabbitHoles) {
           </div>
         </div>
         <div class="maybe-note-field ${currentRating==='maybe'?'visible':''}" id="note-${i}">
-          <input type="text" class="form-control form-control-sm mt-2" placeholder="Note (e.g. too slow)…"
-            value="${escAttr(note)}"
-            onblur="saveNote(${i}, this.value)"
-            onkeydown="if(event.key==='Enter'){this.blur()}">
+          <input type="text" class="form-control form-control-sm" placeholder="Note…"
+                 value="${escAttr(note)}"
+                 onblur="saveNote(${i}, this.value)">
         </div>
       </div>`;
   }).join('');
 
-  // Rabbit holes
-  document.getElementById('rabbitHoles').innerHTML =
-    rabbitHoles.map(a => `<span class="rabbit-hole-pill">${escHtml(a)}</span>`).join('');
+  const rabbitEl = document.getElementById('rabbitHoles');
+  rabbitEl.innerHTML = rabbitHoles.map(a =>
+    `<span class="rabbit-hole-pill">${escHtml(a)}</span>`
+  ).join('');
 }
 
 // ── Feedback ──────────────────────────────────────────────────────────────────
-async function rate(cardIdx, rating) {
-  const card = document.getElementById(`card-${cardIdx}`);
+async function rate(idx, rating) {
+  const card = document.getElementById(`card-${idx}`);
   const trackKey = card.dataset.track;
   const p = state.activeProfile;
   if (!p) return;
 
-  // Toggle off if same rating clicked again
-  const current = state.feedback[trackKey];
-  const newRating = current === rating ? null : rating;
+  state.feedback[trackKey] = rating;
+  await api('POST', `/api/profiles/${p.id}/feedback`, { track_key: trackKey, rating });
 
-  if (newRating) {
-    state.feedback[trackKey] = newRating;
-    await api('POST', `/api/profiles/${p.id}/feedback`, { track_key: trackKey, rating: newRating });
-  } else {
-    delete state.feedback[trackKey];
-    await fetch(`/api/profiles/${p.id}/feedback`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ track_key: trackKey }),
-    });
-  }
-
-  // Re-render just this card's buttons and border
-  card.className = `card rec-card mb-2 p-3 feedback-${newRating || ''}`;
-  const btns = card.querySelectorAll('.feedback-btn-group button');
-  const classes = ['yes','maybe','no'];
+  card.className = `card rec-card mb-2 p-3 feedback-${rating}`;
+  const btns = card.querySelectorAll('.feedback-btn-group .btn');
+  const styles = ['btn-outline-success','btn-outline-warning','btn-outline-danger'];
+  const activeStyles = ['btn-success','btn-warning','btn-danger'];
   btns.forEach((btn, i) => {
-    const r = classes[i];
-    btn.className = `btn btn-sm ${newRating===r ? `btn-${r==='yes'?'success':r==='maybe'?'warning':'danger'}` : `btn-outline-${r==='yes'?'success':r==='maybe'?'warning':'danger'}`}`;
+    btn.className = `btn btn-sm ${i === ['yes','maybe','no'].indexOf(rating) ? activeStyles[i] : styles[i]}`;
   });
 
-  const noteField = document.getElementById(`note-${cardIdx}`);
-  noteField.classList.toggle('visible', newRating === 'maybe');
+  const noteField = document.getElementById(`note-${idx}`);
+  noteField.classList.toggle('visible', rating === 'maybe');
+
   updateFeedbackSummary();
+  updateAddToSpotifyBtn();
 }
 
-async function saveNote(cardIdx, note) {
-  const card = document.getElementById(`card-${cardIdx}`);
+async function saveNote(idx, note) {
+  const card = document.getElementById(`card-${idx}`);
   const trackKey = card.dataset.track;
   const p = state.activeProfile;
-  if (!p || !trackKey) return;
+  if (!p) return;
   state.notes[trackKey] = note;
-  await api('POST', `/api/profiles/${p.id}/feedback`, {
-    track_key: trackKey,
-    rating: state.feedback[trackKey] || 'maybe',
-    note,
-  });
+  await api('POST', `/api/profiles/${p.id}/feedback`, { track_key: trackKey, rating: 'maybe', note });
+}
+
+function updateFeedbackSummary() {
+  const counts = { yes: 0, maybe: 0, no: 0 };
+  Object.values(state.feedback).forEach(r => { if (counts[r] !== undefined) counts[r]++; });
+  document.getElementById('yesCount').textContent   = `✓ ${counts.yes}`;
+  document.getElementById('maybeCount').textContent = `~ ${counts.maybe}`;
+  document.getElementById('noCount').textContent    = `✗ ${counts.no}`;
 }
 
 document.getElementById('clearFeedbackBtn').addEventListener('click', async () => {
   const p = state.activeProfile;
   if (!p || !confirm('Clear all feedback for this profile?')) return;
-  await fetch(`/api/profiles/${p.id}/feedback`, { method: 'DELETE' });
+  await api('DELETE', `/api/profiles/${p.id}/feedback`);
   state.feedback = {};
-  state.notes = {};
+  state.notes    = {};
   updateFeedbackSummary();
-  // Refresh card borders
-  document.querySelectorAll('.rec-card').forEach(c => {
-    c.className = 'card rec-card mb-2 p-3 feedback-';
-    c.querySelectorAll('.feedback-btn-group button').forEach((btn, i) => {
-      const r = ['success','warning','danger'][i];
-      btn.className = `btn btn-sm btn-outline-${r}`;
-    });
-    const noteField = c.querySelector('.maybe-note-field');
-    if (noteField) noteField.classList.remove('visible');
+  updateAddToSpotifyBtn();
+  document.querySelectorAll('.rec-card').forEach(card => {
+    card.className = 'card rec-card mb-2 p-3';
   });
 });
 
-function updateFeedbackSummary() {
-  const yes    = Object.values(state.feedback).filter(r => r === 'yes').length;
-  const maybe  = Object.values(state.feedback).filter(r => r === 'maybe').length;
-  const no     = Object.values(state.feedback).filter(r => r === 'no').length;
-  document.getElementById('yesCount').textContent   = `✓ ${yes}`;
-  document.getElementById('maybeCount').textContent = `~ ${maybe}`;
-  document.getElementById('noCount').textContent    = `✗ ${no}`;
+// ── Add to Spotify ────────────────────────────────────────────────────────────
+function updateAddToSpotifyBtn() {
+  const p = state.activeProfile;
+  const yesCount = Object.values(state.feedback).filter(r => r === 'yes').length;
+  const show = p?.spotify_playlist_id && yesCount > 0 && state.currentRecs.length > 0;
+  document.getElementById('addToSpotifyRow').classList.toggle('d-none', !show);
 }
 
-function resetResults() {
-  recsContainer.classList.add('d-none');
-  idleState.classList.remove('d-none');
-  document.getElementById('sourcePillsRow').classList.add('d-none');
-  document.getElementById('recCards').innerHTML = '';
-  document.getElementById('rabbitHoles').innerHTML = '';
-  resetSteps();
-}
+document.getElementById('addToSpotifyBtn').addEventListener('click', async () => {
+  const p = state.activeProfile;
+  if (!p?.spotify_playlist_id) return;
 
-// ── Utility ───────────────────────────────────────────────────────────────────
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-function escAttr(s) { return escHtml(s); }
+  // Collect yes-rated tracks from current recommendations
+  const yesTracks = state.currentRecs.filter(line => {
+    const trackKey = line.split('|')[0].replace(/"/g,'').trim();
+    return state.feedback[trackKey] === 'yes';
+  });
 
-// ── Init ──────────────────────────────────────────────────────────────────────
+  if (!yesTracks.length) return;
+
+  const btn    = document.getElementById('addToSpotifyBtn');
+  const status = document.getElementById('addToSpotifyStatus');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Adding tracks…';
+  status.textContent = '';
+
+  const data = await api('POST', `/api/spotify/playlists/${p.spotify_playlist_id}/add`, {
+    tracks: yesTracks,
+  });
+
+  btn.disabled = false;
+  btn.innerHTML = '<i class="fab fa-spotify me-2"></i>Add Approved Tracks to Playlist';
+
+  if (data.error) {
+    status.innerHTML = `<span class="text-danger">⚠ ${escHtml(data.error)}</span>`;
+    return;
+  }
+
+  let msg = `<span class="text-success">✓ ${data.added} track${data.added !== 1 ? 's' : ''} added to playlist.</span>`;
+  if (data.failures?.length) {
+    msg += ` <span class="text-warning">${data.failures.length} couldn't be found on Spotify.</span>`;
+  }
+  status.innerHTML = msg;
+});
+
+// ── Feedback summary init ─────────────────────────────────────────────────────
+function updateFeedbackSummaryDisplay() { updateFeedbackSummary(); }
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
 (async () => {
+  await checkSpotifyStatus();
   await loadProfiles();
+
+  // Auto-select if URL param present
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('spotify_connected')) {
+    // Refresh was from OAuth redirect — nothing extra needed
+    window.history.replaceState({}, '', '/playlist-rec');
+  }
 })();
 </script>
 {% endblock %}
