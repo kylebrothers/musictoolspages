@@ -1,118 +1,142 @@
 """
 page_handlers.py — App-specific handlers for playlistrec.
 
-This file adds custom API routes via register_routes() and does NOT override
-the template's handle_claude_call_page / handle_no_call_page — those are
-used as-is from the template for any generic page submissions.
-
 Custom endpoints registered by register_routes():
-  GET    /api/profiles              — list profiles
-  POST   /api/profiles              — create profile
-  GET    /api/profiles/<id>         — get profile
-  PUT    /api/profiles/<id>         — update profile (name, seed_artists, disliked_artists)
-  DELETE /api/profiles/<id>         — delete profile
-  POST   /api/profiles/<id>/csv     — upload CSV, compute centroid
-  GET    /api/profiles/<id>/feedback — get all feedback + notes
-  POST   /api/profiles/<id>/feedback — upsert rating + optional maybe note
-  DELETE /api/profiles/<id>/feedback — clear all feedback
-  POST   /api/playlist-rec/run      — full two-pass recommendation pipeline
+  GET    /api/profiles                                  — list profiles
+  POST   /api/profiles                                  — create profile
+  GET    /api/profiles/<id>                             — get profile
+  PUT    /api/profiles/<id>                             — update profile
+  DELETE /api/profiles/<id>                             — delete profile
+  GET    /api/profiles/<id>/feedback                    — get feedback + notes
+  POST   /api/profiles/<id>/feedback                    — upsert rating
+  DELETE /api/profiles/<id>/feedback                    — clear all feedback
+  GET    /api/spotify/playlists                         — list user's Spotify playlists
+  POST   /api/spotify/playlists/<pid>/link              — fetch tracks, generate sonic profile, store on profile
+  POST   /api/spotify/playlists/<pid>/refresh-profile   — re-generate sonic profile for linked playlist
+  POST   /api/spotify/playlists/<pid>/add               — search + add yes-rated tracks to playlist
+  POST   /api/playlist-rec/run                          — two-pass recommendation pipeline
 """
 
-import io
 import os
-import csv
 import json
 import logging
 import requests
-from flask import request, jsonify, current_app
+from collections import defaultdict
+from flask import request, jsonify
 
 import db
 from config import get_claude_model
+from spotify_auth import spotify_get, spotify_post
 
 logger = logging.getLogger(__name__)
 
-# ── Audio feature columns used for centroid computation ───────────────────────
-CENTROID_FIELDS = [
-    "Energy", "Danceability", "Valence", "Acousticness",
-    "Instrumentalness", "Loudness", "Tempo", "Speechiness",
-]
-
-# Column index map (0-based) matching the Spotify CSV export format
-_COL = {
-    "Track Name": 1,
-    "Artist Name(s)": 3,
-    "Danceability": 12,
-    "Energy": 13,
-    "Loudness": 15,
-    "Speechiness": 17,
-    "Acousticness": 18,
-    "Instrumentalness": 19,
-    "Valence": 21,
-    "Tempo": 22,
-}
-
 # ── Last.fm ───────────────────────────────────────────────────────────────────
-LASTFM_ENDPOINT = "https://ws.audioscrobbler.com/2.0/"
+LASTFM_ENDPOINT    = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_SEED_ARTISTS = ["Weezer", "Barenaked Ladies", "Fountains of Wayne"]
 LASTFM_SIMILAR_COUNT = 15
 
 
-# handle_claude_call_page and handle_no_call_page are intentionally NOT defined
-# here. app.py imports them from the template's page_handlers.py, which provides
-# the full generic implementations. This app uses register_routes() exclusively
-# for its own endpoints and does not need to override the generic handlers.
+# ── Spotify playlist helpers ──────────────────────────────────────────────────
 
-
-# ── CSV processing ────────────────────────────────────────────────────────────
-
-def parse_spotify_csv(file_bytes):
+def _fetch_all_playlist_tracks(playlist_id):
     """
-    Parse a Spotify export CSV (bytes).
-    Returns (centroid dict, top_artists list, track_count int).
+    Fetch every track from a Spotify playlist, handling pagination.
+    Returns list of dicts: {track_name, artist_name, artist_names: [...]}
     """
-    text = file_bytes.decode("utf-8-sig", errors="replace")
-    reader = csv.reader(io.StringIO(text))
-    rows = list(reader)
+    tracks = []
+    url = f"/playlists/{playlist_id}/tracks"
+    params = {"fields": "items(track(name,artists(name))),next", "limit": 100}
 
-    if not rows:
-        raise ValueError("Empty CSV file.")
+    while url:
+        data, err = spotify_get(url, params=params)
+        if err:
+            raise RuntimeError(f"Spotify error fetching tracks: {err}")
+        for item in data.get("items", []):
+            t = item.get("track")
+            if not t or not t.get("name"):
+                continue
+            artist_names = [a["name"] for a in t.get("artists", []) if a.get("name")]
+            if artist_names:
+                tracks.append({
+                    "track_name":  t["name"],
+                    "artist_name": artist_names[0],
+                    "artist_names": artist_names,
+                })
+        # Spotify returns full next URL; strip the base for spotify_get
+        next_url = data.get("next")
+        if next_url:
+            url = next_url.replace("https://api.spotify.com/v1", "")
+            params = {}
+        else:
+            url = None
 
-    # Detect header row and build column map
-    header = [h.strip() for h in rows[0]]
-    col = {name: header.index(name) for name in _COL if name in header}
+    return tracks
 
-    missing = [f for f in list(_COL.keys()) if f not in col]
-    if missing:
-        raise ValueError(f"CSV missing columns: {', '.join(missing)}")
 
-    artist_counts = {}
-    feature_sums = {f: 0.0 for f in CENTROID_FIELDS}
-    valid = 0
+def _group_tracks_by_artist(tracks):
+    """
+    Group track list into {artist: [track_name, ...]} ordered by appearance count.
+    Returns list of (artist, [tracks]) tuples, most-represented artist first.
+    """
+    artist_tracks = defaultdict(list)
+    for t in tracks:
+        artist_tracks[t["artist_name"]].append(t["track_name"])
+    # Sort by number of tracks descending
+    return sorted(artist_tracks.items(), key=lambda x: -len(x[1]))
 
-    for row in rows[1:]:
-        if len(row) < max(col.values()) + 1:
-            continue
-        try:
-            for field in CENTROID_FIELDS:
-                feature_sums[field] += float(row[col[field]])
-            valid += 1
-        except (ValueError, IndexError):
-            continue
 
-        # Count artists (may be semicolon-separated)
-        for artist in row[col["Artist Name(s)"]].split(";"):
-            artist = artist.strip()
-            if artist:
-                artist_counts[artist] = artist_counts.get(artist, 0) + 1
+def _build_sonic_profile_prompt(grouped_tracks):
+    """Build the pre-pass prompt for sonic profile generation."""
+    lines = [
+        "You are a music expert tasked with building a detailed sonic profile of a listener's taste.",
+        "Based on the playlist below, describe what this person's music taste sounds like.",
+        "",
+        "Focus ONLY on sonic and musical properties — not cultural associations, era, or demographics.",
+        "Describe: vocal style, instrumentation, guitar tone if present, tempo feel, energy level,",
+        "harmonic complexity, production style, emotional register, and any other defining sonic traits.",
+        "Note which artists share which qualities, and weight artists by their track count.",
+        "End with a short 'Avoid:' line listing sonic qualities clearly absent or unwanted.",
+        "",
+        "Be specific and detailed. This description will be used to find new music the listener hasn't heard.",
+        "Do NOT mention artist names in your description — only sonic properties.",
+        "",
+        "## Playlist (grouped by artist, track count in parentheses)",
+    ]
 
-    if valid == 0:
-        raise ValueError("No valid audio feature rows found.")
+    for artist, track_list in grouped_tracks:
+        count = len(track_list)
+        sample = track_list[:8]  # cap per-artist track list to keep tokens reasonable
+        lines.append(f"\n{artist} ({count} tracks):")
+        for t in sample:
+            lines.append(f"  - {t}")
+        if count > 8:
+            lines.append(f"  - ... and {count - 8} more")
 
-    centroid = {f: round(feature_sums[f] / valid, 4) for f in CENTROID_FIELDS}
+    lines += [
+        "",
+        "## Sonic Profile",
+        "Write 3–5 detailed paragraphs describing this listener's sonic taste.",
+        "Do not mention specific artists. Focus entirely on sound.",
+    ]
+    return "\n".join(lines)
 
-    top_artists = sorted(artist_counts, key=lambda a: -artist_counts[a])[:15]
 
-    return centroid, top_artists, valid
+def _generate_sonic_profile(claude_client, grouped_tracks):
+    """
+    Run the sonic profile pre-pass. Returns profile text string.
+    Raises RuntimeError on failure.
+    """
+    model = get_claude_model()
+    prompt = _build_sonic_profile_prompt(grouped_tracks)
+    try:
+        resp = claude_client.messages.create(
+            model=model,
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        raise RuntimeError(f"Sonic profile generation failed: {e}")
 
 
 # ── Last.fm ───────────────────────────────────────────────────────────────────
@@ -133,11 +157,11 @@ def fetch_lastfm_similar(api_key, seed_artists=None, count=LASTFM_SIMILAR_COUNT)
             resp = requests.get(
                 LASTFM_ENDPOINT,
                 params={
-                    "method": "artist.getsimilar",
-                    "artist": artist,
+                    "method":  "artist.getsimilar",
+                    "artist":  artist,
                     "api_key": api_key,
-                    "format": "json",
-                    "limit": count,
+                    "format":  "json",
+                    "limit":   count,
                 },
                 timeout=5,
             )
@@ -155,14 +179,14 @@ def fetch_lastfm_similar(api_key, seed_artists=None, count=LASTFM_SIMILAR_COUNT)
 
 # ── Prompt builders ───────────────────────────────────────────────────────────
 
-def _build_pass1_prompt(profile, similar_artists, feedback):
-    centroid = profile.get("centroid") or {}
-    seed_artists = profile.get("seed_artists") or []
-    disliked = profile.get("disliked_artists") or []
+def _build_pass1_prompt(profile, similar_artists, feedback, playlist_tracks=None):
+    sonic_profile  = profile.get("sonic_profile") or ""
+    seed_artists   = profile.get("seed_artists") or []
+    disliked       = profile.get("disliked_artists") or []
 
-    yes_tracks = [k for k, v in feedback.items() if v == "yes"]
+    yes_tracks   = [k for k, v in feedback.items() if v == "yes"]
     maybe_tracks = [k for k, v in feedback.items() if v == "maybe"]
-    no_tracks = [k for k, v in feedback.items() if v == "no"]
+    no_tracks    = [k for k, v in feedback.items() if v == "no"]
 
     lines = [
         "You are generating a raw candidate list of song recommendations for human validation.",
@@ -171,12 +195,15 @@ def _build_pass1_prompt(profile, similar_artists, feedback):
         "",
         "## Listener Profile",
         f"Seed artists: {', '.join(seed_artists) if seed_artists else 'None'}",
-        f"Disliked artists (exclude these entirely): {', '.join(disliked) if disliked else 'None'}",
-        "",
-        "## Audio Centroid (Spotify feature averages)",
+        f"Disliked artists (exclude entirely): {', '.join(disliked) if disliked else 'None'}",
     ]
-    for k, v in centroid.items():
-        lines.append(f"  {k}: {v}")
+
+    if sonic_profile:
+        lines += [
+            "",
+            "## Sonic Profile (prioritise this over era or cultural association)",
+            sonic_profile,
+        ]
 
     if similar_artists:
         lines += [
@@ -192,10 +219,23 @@ def _build_pass1_prompt(profile, similar_artists, feedback):
     if no_tracks:
         lines += ["", "## Hard Exclusions (do not recommend these artists or songs)"] + no_tracks
 
+    if playlist_tracks:
+        lines += [
+            "",
+            "## Already In Playlist — Do Not Recommend These",
+            "(These tracks are already in the user's playlist. Exclude them and their obvious variants.)",
+        ]
+        for t in playlist_tracks:
+            lines.append(f'  "{t["track_name"]}" — {t["artist_name"]}')
+
     lines += [
         "",
+        "## IMPORTANT: Prioritise sonic similarity over era or cultural association.",
+        "Recommend songs from ANY era that match the sonic profile, not just contemporaries.",
+        "Include both well-known and deep-cut / less-popular tracks.",
+        "",
         "## Output Format (20 candidates, one per line)",
-        '"Song Title" – Artist (Year) | energy:[0-1] danceability:[0-1] valence:[0-1] acousticness:[0-1] tempo:[BPM] | solo:[yes/no/notable] | [one sentence on fit]',
+        '"Song Title" – Artist (Year) | solo:[yes/no/notable] | [one sentence on sonic fit]',
         "",
         "Generate 20 candidates now:",
     ]
@@ -204,7 +244,7 @@ def _build_pass1_prompt(profile, similar_artists, feedback):
 
 
 def _build_pass2_prompt(profile, candidates_text, feedback):
-    disliked = profile.get("disliked_artists") or []
+    disliked  = profile.get("disliked_artists") or []
     no_tracks = [k for k, v in feedback.items() if v == "no"]
 
     lines = [
@@ -214,10 +254,6 @@ def _build_pass2_prompt(profile, candidates_text, feedback):
         "",
         "## Hard Rejection Rules",
         "Reject a candidate if ANY of the following are true:",
-        "  - Energy > 0.94",
-        "  - Acousticness > 0.28",
-        "  - Tempo outside 92–172 BPM",
-        "  - Valence < 0.18",
         f"  - Artist is in disliked list: {', '.join(disliked) if disliked else 'None'}",
         "  - Already in the user's collection (common knowledge check)",
         "  - solo:no with no other strong qualifying factors",
@@ -249,19 +285,27 @@ def _build_pass2_prompt(profile, candidates_text, feedback):
 def run_pipeline(profile, claude_client, lastfm_api_key, feedback):
     """
     Execute the two-pass recommendation pipeline.
-    Returns dict: {recommendations: [...], rabbit_holes: [...], pass1_raw: str}
+    Returns (result_dict, status_code).
     """
     if not claude_client:
         return {"error": "Claude API not available"}, 503
 
-    # Last.fm similar artists
-    similar = fetch_lastfm_similar(lastfm_api_key, profile.get("seed_artists"))
-
-    # Resolve model once per pipeline run
     model = get_claude_model()
 
+    # Last.fm similar artists (seeded from profile seed_artists)
+    similar = fetch_lastfm_similar(lastfm_api_key, profile.get("seed_artists"))
+
+    # Fetch playlist tracks for exclusion if a playlist is linked
+    playlist_tracks = []
+    playlist_id = profile.get("spotify_playlist_id")
+    if playlist_id:
+        try:
+            playlist_tracks = _fetch_all_playlist_tracks(playlist_id)
+        except Exception as e:
+            logger.warning(f"Could not fetch playlist tracks for exclusion: {e}")
+
     # Pass 1
-    p1_prompt = _build_pass1_prompt(profile, similar, feedback)
+    p1_prompt = _build_pass1_prompt(profile, similar, feedback, playlist_tracks)
     try:
         p1_resp = claude_client.messages.create(
             model=model,
@@ -292,8 +336,8 @@ def run_pipeline(profile, claude_client, lastfm_api_key, feedback):
 
     # Parse output
     recommendations = []
-    rabbit_holes = []
-    section = None
+    rabbit_holes    = []
+    section         = None
 
     for line in p2_text.splitlines():
         stripped = line.strip()
@@ -311,34 +355,26 @@ def run_pipeline(profile, claude_client, lastfm_api_key, feedback):
             rabbit_holes.append(stripped)
 
     return {
-        "recommendations": recommendations,
-        "rabbit_holes": rabbit_holes,
-        "pass1_raw": candidates_text,
+        "recommendations":      recommendations,
+        "rabbit_holes":         rabbit_holes,
+        "pass1_raw":            candidates_text,
         "lastfm_similar_count": len(similar),
+        "playlist_tracks_excluded": len(playlist_tracks),
     }, 200
 
 
-# ── Custom routes — registered via app.py's before_first_request or directly ──
-# These are imported in a register_routes() call from app.py if it exists,
-# or wired via a Flask Blueprint. For simplicity under the template pattern,
-# we expose a register() function that app.py can call after creating the app.
+# ── Route registration ────────────────────────────────────────────────────────
 
 def register_routes(app, claude_client_ref):
     """
     Register playlistrec-specific API routes on the Flask app.
-    Call this from app.py after create_app().
-
-    Usage in app.py:
-        from page_handlers import register_routes
-        register_routes(app, lambda: claude_client)
+    Called from app.py after create_app().
     """
     import db as _db
-    _db.init_db()  # idempotent — safe to call here; creates tables if not present
+    _db.init_db()
 
-    # Resolve and log the Claude model at startup rather than on first request
     get_claude_model()
 
-    # Register Spotify OAuth routes
     from spotify_auth import register_spotify_routes
     register_spotify_routes(app)
 
@@ -391,31 +427,6 @@ def register_routes(app, claude_client_ref):
         _db.delete_profile(pid)
         return jsonify({"deleted": pid})
 
-    # ── CSV upload → centroid ─────────────────────────────────────────────────
-
-    @app.route("/api/profiles/<int:pid>/csv", methods=["POST"])
-    def upload_csv(pid):
-        profile = _db.get_profile(pid)
-        if not profile:
-            return jsonify({"error": "Profile not found"}), 404
-        if "csv_file" not in request.files:
-            return jsonify({"error": "No csv_file in request"}), 400
-
-        f = request.files["csv_file"]
-        try:
-            centroid, top_artists, track_count = parse_spotify_csv(f.read())
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-
-        _db.update_profile(pid, centroid=centroid)
-
-        return jsonify({
-            "centroid": centroid,
-            "top_artists": top_artists,
-            "track_count": track_count,
-            "message": f"Centroid computed from {track_count} tracks.",
-        })
-
     # ── Feedback ──────────────────────────────────────────────────────────────
 
     @app.route("/api/profiles/<int:pid>/feedback", methods=["GET"])
@@ -423,7 +434,7 @@ def register_routes(app, claude_client_ref):
         if not _db.get_profile(pid):
             return jsonify({"error": "Not found"}), 404
         ratings = _db.get_feedback(pid)
-        notes = _db.get_maybe_notes(pid)
+        notes   = _db.get_maybe_notes(pid)
         return jsonify({"feedback": ratings, "notes": notes})
 
     @app.route("/api/profiles/<int:pid>/feedback", methods=["POST"])
@@ -432,7 +443,7 @@ def register_routes(app, claude_client_ref):
             return jsonify({"error": "Not found"}), 404
         data = request.get_json(force=True, silent=True) or {}
         track_key = (data.get("track_key") or "").strip()
-        rating = data.get("rating", "")
+        rating    = data.get("rating", "")
         if not track_key or rating not in ("yes", "maybe", "no"):
             return jsonify({"error": "track_key and rating (yes/maybe/no) required"}), 400
         _db.set_feedback(pid, track_key, rating)
@@ -447,19 +458,179 @@ def register_routes(app, claude_client_ref):
         _db.clear_feedback(pid)
         return jsonify({"ok": True})
 
+    # ── Spotify: list playlists ───────────────────────────────────────────────
+
+    @app.route("/api/spotify/playlists", methods=["GET"])
+    def list_spotify_playlists():
+        playlists = []
+        url    = "/me/playlists"
+        params = {"limit": 50}
+
+        while url:
+            data, err = spotify_get(url, params=params)
+            if err:
+                return jsonify({"error": err}), 502
+            for item in data.get("items", []):
+                if item:
+                    playlists.append({
+                        "id":     item["id"],
+                        "name":   item["name"],
+                        "tracks": item.get("tracks", {}).get("total", 0),
+                        "image":  (item.get("images") or [{}])[0].get("url"),
+                    })
+            next_url = data.get("next")
+            url    = next_url.replace("https://api.spotify.com/v1", "") if next_url else None
+            params = {}
+
+        return jsonify({"playlists": playlists})
+
+    # ── Spotify: link playlist → generate sonic profile ───────────────────────
+
+    def _link_playlist_to_profile(pid, playlist_id, claude_client):
+        """
+        Shared logic for initial link and refresh:
+        fetch tracks, generate sonic profile, persist both on profile.
+        Returns (response_dict, status_code).
+        """
+        profile = _db.get_profile(pid)
+        if not profile:
+            return {"error": "Profile not found"}, 404
+
+        # Fetch all tracks
+        try:
+            tracks = _fetch_all_playlist_tracks(playlist_id)
+        except RuntimeError as e:
+            return {"error": str(e)}, 502
+
+        if not tracks:
+            return {"error": "Playlist is empty or inaccessible"}, 400
+
+        grouped = _group_tracks_by_artist(tracks)
+
+        # Generate sonic profile via Claude pre-pass
+        if not claude_client:
+            return {"error": "Claude API not available"}, 503
+        try:
+            sonic_profile = _generate_sonic_profile(claude_client, grouped)
+        except RuntimeError as e:
+            return {"error": str(e)}, 500
+
+        # Extract top artists for seed_artists if profile has none
+        top_artists = [artist for artist, _ in grouped[:15]]
+
+        updates = {
+            "spotify_playlist_id": playlist_id,
+            "sonic_profile":       sonic_profile,
+        }
+        if not profile.get("seed_artists"):
+            updates["seed_artists"] = top_artists
+
+        _db.update_profile(pid, **updates)
+
+        return {
+            "ok":            True,
+            "track_count":   len(tracks),
+            "artist_count":  len(grouped),
+            "sonic_profile": sonic_profile,
+            "top_artists":   top_artists,
+        }, 200
+
+    @app.route("/api/spotify/playlists/<playlist_id>/link/<int:pid>", methods=["POST"])
+    def link_playlist(playlist_id, pid):
+        result, status = _link_playlist_to_profile(pid, playlist_id, claude_client_ref())
+        if status == 200:
+            result["profile"] = _db.get_profile(pid)
+        return jsonify(result), status
+
+    @app.route("/api/spotify/playlists/<playlist_id>/refresh-profile/<int:pid>", methods=["POST"])
+    def refresh_sonic_profile(playlist_id, pid):
+        result, status = _link_playlist_to_profile(pid, playlist_id, claude_client_ref())
+        if status == 200:
+            result["profile"] = _db.get_profile(pid)
+        return jsonify(result), status
+
+    # ── Spotify: add tracks to playlist ──────────────────────────────────────
+
+    @app.route("/api/spotify/playlists/<playlist_id>/add", methods=["POST"])
+    def add_tracks_to_playlist(playlist_id):
+        data        = request.get_json(force=True, silent=True) or {}
+        track_strs  = data.get("tracks", [])   # list of "Song Title" – Artist strings
+        if not track_strs:
+            return jsonify({"error": "tracks list is required"}), 400
+
+        uris     = []
+        failures = []
+
+        for track_str in track_strs:
+            # Parse: "Song Title" – Artist (Year) | ...
+            # Extract the part before the first |
+            core = track_str.split("|")[0].strip()
+            # Remove surrounding quotes from title portion
+            core = core.replace('"', '')
+            # Split on em-dash or regular dash with surrounding space
+            for sep in [" – ", " - ", "–", "-"]:
+                if sep in core:
+                    parts = core.split(sep, 1)
+                    title  = parts[0].strip()
+                    artist = parts[1].strip()
+                    # Strip year if present: "Artist (Year)" → "Artist"
+                    if artist.endswith(")") and "(" in artist:
+                        artist = artist[:artist.rfind("(")].strip()
+                    break
+            else:
+                title  = core
+                artist = ""
+
+            query = f"track:{title} artist:{artist}" if artist else f"track:{title}"
+            search_data, err = spotify_get("/search", params={
+                "q": query, "type": "track", "limit": 1
+            })
+            if err or not search_data:
+                failures.append({"track": track_str, "reason": err or "no results"})
+                continue
+
+            items = search_data.get("tracks", {}).get("items", [])
+            if not items:
+                failures.append({"track": track_str, "reason": "no search results"})
+                continue
+
+            uris.append(items[0]["uri"])
+
+        if not uris:
+            return jsonify({"error": "No tracks could be resolved", "failures": failures}), 400
+
+        # Add in batches of 100 (Spotify limit)
+        added = 0
+        for i in range(0, len(uris), 100):
+            batch = uris[i:i + 100]
+            _, err = spotify_post(f"/playlists/{playlist_id}/tracks", {"uris": batch})
+            if err:
+                return jsonify({"error": f"Spotify error adding tracks: {err}"}), 502
+            added += len(batch)
+
+        return jsonify({
+            "ok":       True,
+            "added":    added,
+            "failures": failures,
+        })
+
     # ── Recommendation pipeline ───────────────────────────────────────────────
 
     @app.route("/api/playlist-rec/run", methods=["POST"])
     def run_recommendations():
         data = request.get_json(force=True, silent=True) or {}
-        pid = data.get("profile_id")
+        pid  = data.get("profile_id")
         if not pid:
             return jsonify({"error": "profile_id required"}), 400
         profile = _db.get_profile(int(pid))
         if not profile:
             return jsonify({"error": "Profile not found"}), 404
-        if not profile.get("centroid"):
-            return jsonify({"error": "Profile has no centroid — upload a CSV first"}), 400
+
+        # Require either a sonic profile (new flow) or legacy centroid
+        if not profile.get("sonic_profile") and not profile.get("centroid"):
+            return jsonify({
+                "error": "Profile has no sonic profile — link a Spotify playlist first"
+            }), 400
 
         feedback = _db.get_feedback(int(pid))
         result, status = run_pipeline(
